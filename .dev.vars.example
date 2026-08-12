@@ -1,0 +1,10 @@
+# Copy this file to `.dev.vars` for local dev (`.dev.vars` is gitignored).
+# In production, set real values with: wrangler secret put <NAME>
+
+# Bearer token that gates the MCP endpoint (checked in the Worker fetch() wrapper
+# BEFORE delegating to createMcpHandler). Use an unguessable random string.
+MCP_BEARER_TOKEN="change-me-to-an-unguessable-token"
+
+# Optional (v1): VirusTotal free personal API key. Leave empty to run without VT
+# (VT signal degrades cleanly per spec §10). Free tier = 4 req/min, 500/day.
+VIRUSTOTAL_API_KEY=""
