@@ -63,6 +63,8 @@ Inspired by the Android app **URLCheck** (TrianguloY), but re-shaped for an agen
 - Typosquat/bitsquat detection (curated brand list).
 - RDAP exact domain-age (only if NRD proves too coarse).
 - Google Safe Browsing (bigger phishing coverage; needs key).
+- **Signal candidates validated by comparable (`unphurl-mcp`, a shipped paid product that converged on ~our signal set):** parked-domain detection, MX-record existence check, URL-entropy scoring, and a **Tranco-top-100k known-good fast-path** (instant SAFE, skip resolution+feeds — latency win + load reduction). Add on evidence, not spec-time.
+- **Companion Skill (at ship):** model ours on unphurl's `check-url-safety` skill pattern — trigger list (about-to-follow/recommend/output, user asks to open/evaluate, URLs in reviewed code, URL from external source), verdict-tiered response (SAFE silent / SUSPICIOUS mention / DANGEROUS flag+breakdown), and "what not to check" (well-known + allowlisted + own-dev + internal IPs).
 
 ### OUT (explicitly not building)
 - Full-GET/body fetch or page rendering of targets (exploit surface — HEAD only).
@@ -184,6 +186,7 @@ Cron Trigger (daily) ── diff-refresh each feed into D1; purge/update meta; (
 
 - **Shortened link:** resolve hops (cap ~10) → verdict on final. Chain returned regardless.
 - **HEAD unsupported (405 / no-redirect-on-HEAD):** fall back to a GET whose body read is aborted at the headers (stream, cancel before body) — preserves "never download/execute the body" while still resolving. Prevents a false `unresolvable` that would look like the §17 kill signal.
+- **Hanging target / slow feed:** every outbound `fetch` (each redirect hop, each feed pull, VT) runs under an explicit `AbortController` timeout (~3–5s per hop, hard overall budget for the whole check). A dead server must never wedge a request — a timeout becomes a `degraded` note, not a hang. *(Field lesson: "put real timeouts around every tool call; a command must not be able to sit." A missing timeout would masquerade as the §17 HEAD-unreliable kill signal.)*
 - **Redirect loop / excess hops:** stop at cap → `SUSPICIOUS` (`degraded: hop cap reached`).
 - **NXDOMAIN / unresolvable:** distinct `unresolvable` state → mildly `SUSPICIOUS`, never a crash.
 - **Non-HTTP scheme** (`ftp:`, `mailto:`): rejected with clear error. `javascript:`/`data:` → flagged DANGEROUS (not a fetch).
@@ -224,6 +227,7 @@ Cron Trigger (daily) ── diff-refresh each feed into D1; purge/update meta; (
 - **Performance probe:** time 20 mixed uncached calls; p95 < 2s. Repeat cached; p95 < 100ms. *(SC9)*
 - **Safe testing:** redirect hops tested against a **controlled 302 Worker route** + benign public shorteners; feed logic tested with **static known-listed** domains — never by visiting live malware. Unit tests mock the fetch layer; one live e2e against the controlled redirect.
 - **Prod verify (each deploy):** poll `/health` to green (all feeds fresh) → run golden clean + golden bad in prod.
+- **Auth-compat check (field lesson — top remote-MCP failure mode):** connect from the **real Claude client** via `mcp-remote` (not just MCP Inspector) and confirm the bearer-token flow authenticates and a tool call round-trips. Client/server auth mismatch is a common silent failure.
 
 ---
 
