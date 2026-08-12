@@ -5,6 +5,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { resolveUrl } from "./resolver.ts";
+import { cleanUrl } from "./cleaner.ts";
 
 interface Env {
   MCP_BEARER_TOKEN?: string;
@@ -22,7 +23,14 @@ function createServer(): McpServer {
     },
     async ({ url }: { url: string }) => {
       try {
-        const result = await resolveUrl(url);
+        const resolved = await resolveUrl(url);
+        const cleaned = cleanUrl(resolved.finalUrl);
+        const result = {
+          ...resolved,
+          cleanedUrl: cleaned.cleanedUrl,
+          removedParams: cleaned.removedParams,
+          queryParams: cleaned.queryParams,
+        };
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (e) {
         return {

@@ -39,3 +39,32 @@ test("tools/list with valid bearer returns check_url", async () => {
   assert.equal(res.status, 200);
   assert.match(await res.text(), /"name":"check_url"/);
 });
+
+test("check_url end-to-end: resolves AND strips trackers from the final URL", async () => {
+  // example.com is a plain IANA test domain with no ClearURLs-specific provider,
+  // so globalRules' utm_*/fbclid stripping applies (unlike e.g. github.com, which
+  // ClearURLs deliberately exempts from globalRules in favor of its own narrow rules).
+  const res = await worker.fetch(
+    mcpReq(
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "check_url", arguments: { url: "https://example.com/?utm_source=test&fbclid=abc" } },
+      },
+      "test-secret",
+    ),
+    ENV,
+    ctx,
+  );
+  assert.equal(res.status, 200);
+  const text = await res.text();
+  // Unwrap the double-encoded content: SSE frame -> JSON-RPC result -> tool's text payload.
+  const rpcResult = JSON.parse(text.split("data: ")[1]);
+  const payload = JSON.parse(rpcResult.result.content[0].text);
+  // No redirect occurs (example.com answers 200 directly), so finalUrl retains the
+  // original query string — cleaning is a separate step, reflected only in cleanedUrl.
+  assert.equal(payload.finalUrl, "https://example.com/?utm_source=test&fbclid=abc");
+  assert.equal(payload.cleanedUrl, "https://example.com/");
+  assert.deepEqual(payload.removedParams.sort(), ["fbclid", "utm_source"]);
+});
