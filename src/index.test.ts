@@ -68,3 +68,27 @@ test("check_url end-to-end: resolves AND strips trackers from the final URL", as
   assert.equal(payload.cleanedUrl, "https://example.com/");
   assert.deepEqual(payload.removedParams.sort(), ["fbclid", "utm_source"]);
 });
+
+test("check_url flags heuristic hits for a structurally suspicious URL", async () => {
+  const res = await worker.fetch(
+    mcpReq(
+      {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        // no network hop needed: resolveUrl on a non-redirecting target still runs
+        // (the private-IP guard fires before any fetch, so this is instant + offline)
+        params: { name: "check_url", arguments: { url: "http://169.254.169.254/paypal" } },
+      },
+      "test-secret",
+    ),
+    ENV,
+    ctx,
+  );
+  assert.equal(res.status, 200);
+  const rpcResult = JSON.parse((await res.text()).split("data: ")[1]);
+  const payload = JSON.parse(rpcResult.result.content[0].text);
+  assert.equal(payload.stoppedReason, "private_host");
+  const ids = payload.heuristics.map((h: { id: string }) => h.id);
+  assert.ok(ids.includes("ip_literal_host"));
+});

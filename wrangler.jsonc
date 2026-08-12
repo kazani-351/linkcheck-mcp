@@ -3,5 +3,8 @@
   "name": "linkcheck-mcp",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-01",
+  // Required by the `agents` package (imports node:async_hooks) and by our own
+  // punycode/IDN decoding in heuristics.ts (node:url domainToUnicode).
+  "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true }
 }

@@ -6,6 +6,7 @@ import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { resolveUrl } from "./resolver.ts";
 import { cleanUrl } from "./cleaner.ts";
+import { runHeuristics } from "./heuristics.ts";
 
 interface Env {
   MCP_BEARER_TOKEN?: string;
@@ -25,11 +26,13 @@ function createServer(): McpServer {
       try {
         const resolved = await resolveUrl(url);
         const cleaned = cleanUrl(resolved.finalUrl);
+        const heuristics = runHeuristics(resolved.finalUrl);
         const result = {
           ...resolved,
           cleanedUrl: cleaned.cleanedUrl,
           removedParams: cleaned.removedParams,
           queryParams: cleaned.queryParams,
+          heuristics,
         };
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (e) {
