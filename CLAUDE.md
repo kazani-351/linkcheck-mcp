@@ -24,13 +24,16 @@ return a tiered verdict + evidence. Full design in **[SPEC.md](SPEC.md)** — re
 - `MCP_BEARER_TOKEN` (+ optional `VIRUSTOTAL_API_KEY`) via `wrangler secret` in prod, `.dev.vars` locally.
 - `.dev.vars` / `.env*` / `.mcp.json` are gitignored. Never commit a secret; halt if one appears in a diff.
 
-## Run / test (filled in at build)
-- Local dev: `wrangler dev` → MCP endpoint at `http://localhost:8788/mcp`.
-- Test with MCP Inspector: `npx @modelcontextprotocol/inspector@latest`.
+## Run / test
+- **`wrangler dev` does NOT work on this machine** (macOS 12.6; workerd needs 13.5+). Do not rely on it locally.
+- **Local testing = `node --test 'src/*.test.ts'`** — Node runs the resolver and drives the web-standard `createMcpHandler` directly (synthetic `Request`s), no workerd. This is the primary local loop.
+- **Real Workers-runtime verification = deploy** (`wrangler deploy`, uploads to the edge — works on 12.6) then curl the live `*.kazani.workers.dev` URL.
 - Golden acceptance set: SPEC.md §12.
 
 ## Definition of done (binding — SPEC.md SC10)
 Code working is NOT done. v1 is done only when: **repo public + a BlogChain post about building it is published.** This is the conversion guardrail from the premise grill — not optional, not "someday."
 
 ## Gotchas
-- (Add one-line gotchas here as real bugs are hit — guardrail, not knowledge base.)
+- **workerd needs macOS 13.5+**; this machine is 12.6, so `wrangler dev` errors out. Test via `node --test` (handler runs in Node) or deploy. See Run/test.
+- **`createMcpHandler` rejects requests with a 403 "Missing Host header"** — its DNS-rebinding guard. When driving it directly in Node tests, set a `host: "localhost"` header on the synthetic `Request`.
+- **Import shared modules with the `.ts` extension** (`from "./resolver.ts"`) — Node's native type-stripping requires it; `tsconfig` has `allowImportingTsExtensions`. `*.test.ts`/`*.probe.ts` are excluded from `tsc` (Node-runtime, not Workers-typed).

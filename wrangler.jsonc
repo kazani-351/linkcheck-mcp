@@ -1,0 +1,7 @@
+{
+  // Slice 2: bare MCP integration. D1/KV/Cron bindings added in later slices.
+  "name": "linkcheck-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "observability": { "enabled": true }
+}
