@@ -92,3 +92,29 @@ test("check_url flags heuristic hits for a structurally suspicious URL", async (
   const ids = payload.heuristics.map((h: { id: string }) => h.id);
   assert.ok(ids.includes("ip_literal_host"));
 });
+
+test("tools/list includes check_text", async () => {
+  const res = await worker.fetch(mcpReq({ jsonrpc: "2.0", id: 4, method: "tools/list" }, "test-secret"), ENV, ctx);
+  assert.match(await res.text(), /"name":"check_text"/);
+});
+
+test("check_text end-to-end: extracts and checks multiple URLs from a blob", async () => {
+  const text = "Please review https://example.com/?utm_source=x and also http://169.254.169.254/internal";
+  const res = await worker.fetch(
+    mcpReq(
+      { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "check_text", arguments: { text } } },
+      "test-secret",
+    ),
+    ENV,
+    ctx,
+  );
+  assert.equal(res.status, 200);
+  const rpcResult = JSON.parse((await res.text()).split("data: ")[1]);
+  const payload = JSON.parse(rpcResult.result.content[0].text);
+  assert.equal(payload.checked.length, 2);
+  assert.equal(payload.truncated, false);
+  const cleanOne = payload.checked.find((c: { url: string }) => c.url.includes("example.com"));
+  assert.deepEqual(cleanOne.removedParams, ["utm_source"]);
+  const badOne = payload.checked.find((c: { url: string }) => c.url.includes("169.254"));
+  assert.ok(badOne.heuristics.some((h: { id: string }) => h.id === "ip_literal_host"));
+});

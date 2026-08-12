@@ -7,9 +7,26 @@ import { z } from "zod";
 import { resolveUrl } from "./resolver.ts";
 import { cleanUrl } from "./cleaner.ts";
 import { runHeuristics } from "./heuristics.ts";
+import { extractUrls } from "./extract.ts";
 
 interface Env {
   MCP_BEARER_TOKEN?: string;
+}
+
+// Shared by check_url and check_text — resolve, clean, and heuristically inspect
+// one URL. Scoring/verdict (SPEC §8) lands in a later slice; for now this returns
+// the raw signals each tool needs.
+async function checkOneUrl(url: string) {
+  const resolved = await resolveUrl(url);
+  const cleaned = cleanUrl(resolved.finalUrl);
+  const heuristics = runHeuristics(resolved.finalUrl);
+  return {
+    ...resolved,
+    cleanedUrl: cleaned.cleanedUrl,
+    removedParams: cleaned.removedParams,
+    queryParams: cleaned.queryParams,
+    heuristics,
+  };
 }
 
 function createServer(): McpServer {
@@ -24,16 +41,7 @@ function createServer(): McpServer {
     },
     async ({ url }: { url: string }) => {
       try {
-        const resolved = await resolveUrl(url);
-        const cleaned = cleanUrl(resolved.finalUrl);
-        const heuristics = runHeuristics(resolved.finalUrl);
-        const result = {
-          ...resolved,
-          cleanedUrl: cleaned.cleanedUrl,
-          removedParams: cleaned.removedParams,
-          queryParams: cleaned.queryParams,
-          heuristics,
-        };
+        const result = await checkOneUrl(url);
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (e) {
         return {
@@ -41,6 +49,33 @@ function createServer(): McpServer {
           isError: true,
         };
       }
+    },
+  );
+
+  server.registerTool(
+    "check_text",
+    {
+      description:
+        "Extract every URL from a block of text (standard links, bare domains, and defanged forms like hxxp://evil[.]com) and check each one. Call this on a pasted email, message, or document before trusting any link inside it.",
+      inputSchema: { text: z.string().describe("Free text that may contain one or more URLs") },
+    },
+    async ({ text }: { text: string }) => {
+      const extracted = extractUrls(text);
+      const checked = await Promise.all(
+        extracted.urls.map(async (url) => {
+          try {
+            return { url, ...(await checkOneUrl(url)) };
+          } catch (e) {
+            return { url, error: (e as Error).message };
+          }
+        }),
+      );
+      const result = {
+        checked,
+        truncated: extracted.truncated,
+        droppedCount: extracted.droppedCount,
+      };
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     },
   );
 
