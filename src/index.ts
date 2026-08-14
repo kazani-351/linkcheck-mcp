@@ -17,7 +17,8 @@ import {
   type MinimalD1,
   type MinimalKV,
 } from "./feeds.ts";
-import { computeVerdict } from "./scorer.ts";
+import { computeVerdict, type Verdict } from "./scorer.ts";
+import { checkVirusTotal } from "./virustotal.ts";
 
 // Typed against the minimal interfaces feeds.ts actually uses (prepare/bind/all,
 // get) rather than the full D1Database/KVNamespace surface — a real Cloudflare
@@ -27,12 +28,15 @@ interface Env {
   MCP_BEARER_TOKEN?: string;
   FEEDS_DB?: MinimalD1;
   VERDICT_CACHE?: MinimalKV;
+  VIRUSTOTAL_API_KEY?: string;
 }
 
 // Shared by check_url and check_text — resolve, clean, heuristically inspect, and
-// check threat feeds for one URL. Scoring/verdict (SPEC §8) lands in a later
-// slice; for now this returns the raw signals each tool needs.
-async function checkOneUrl(url: string, env: Env) {
+// check threat feeds for one URL. useVirusTotal defaults true (check_url's
+// single-lookup path); check_text passes false on its first pass and only
+// re-checks its single worst candidate with VT on, to stay under VT's 4/min
+// free-tier limit (SPEC §7 "VT off in batch, worst-candidate only").
+async function checkOneUrl(url: string, env: Env, useVirusTotal = true) {
   const resolved = await resolveUrl(url);
   const cleaned = cleanUrl(resolved.finalUrl);
   const heuristics = runHeuristics(resolved.finalUrl);
@@ -83,6 +87,13 @@ async function checkOneUrl(url: string, env: Env) {
     }
   } else if (hostname) {
     degraded.push("feed lookups skipped: D1/KV bindings not configured");
+  }
+
+  if (useVirusTotal) {
+    const vt = await checkVirusTotal(resolved.finalUrl, env.VIRUSTOTAL_API_KEY);
+    if (vt.degraded) degraded.push(vt.degraded);
+    if (vt.malicious > 0) feedSignals.push({ matchedValue: String(vt.malicious), source: "VirusTotal", type: "virustotal_malicious" });
+    else if (vt.suspicious > 0) feedSignals.push({ matchedValue: String(vt.suspicious), source: "VirusTotal", type: "virustotal_suspicious" });
   }
 
   const { verdict, verdictReason } = computeVerdict({
@@ -161,21 +172,43 @@ function createServer(env: Env): McpServer {
     },
     async ({ text, compact }: { text: string; compact?: boolean }) => {
       const extracted = extractUrls(text);
-      const checked = await Promise.all(
+      const order = { SAFE: 0, SUSPICIOUS: 1, DANGEROUS: 2 } as const;
+
+      // First pass: no VT (SPEC §7 rate-limit guard — one call per URL would
+      // exceed VT's 4/min free tier on any blob with more than a few links).
+      type CheckedEntry = { url: string; error?: string } & Partial<FullResult>;
+      const firstPass: CheckedEntry[] = await Promise.all(
         extracted.urls.map(async (url) => {
           try {
-            const result = await checkOneUrl(url, env);
-            return { url, ...(compact ? toCompact(result) : result) };
+            const result = await checkOneUrl(url, env, false);
+            return { url, ...result };
           } catch (e) {
             return { url, error: (e as Error).message };
           }
         }),
       );
-      const worstVerdict = checked.reduce<string>((worst, c) => {
-        const order = { SAFE: 0, SUSPICIOUS: 1, DANGEROUS: 2 } as const;
-        const v = "verdict" in c ? (c.verdict as keyof typeof order) : undefined;
-        return v && order[v] > (order[worst as keyof typeof order] ?? -1) ? v : worst;
-      }, "SAFE");
+
+      // Second pass: re-check ONLY the single worst candidate with VT on, if
+      // it's already SUSPICIOUS+ from cheaper signals and a VT key exists.
+      let worstIdx = -1;
+      for (let i = 0; i < firstPass.length; i++) {
+        const v = firstPass[i].verdict;
+        if (v && order[v] > (worstIdx >= 0 ? order[firstPass[worstIdx].verdict as Verdict] : -1)) worstIdx = i;
+      }
+      if (worstIdx >= 0 && firstPass[worstIdx].verdict !== "SAFE" && env.VIRUSTOTAL_API_KEY) {
+        try {
+          const reChecked = await checkOneUrl(firstPass[worstIdx].url, env, true);
+          firstPass[worstIdx] = { url: firstPass[worstIdx].url, ...reChecked };
+        } catch {
+          /* keep the first-pass result for this URL if the VT re-check itself throws */
+        }
+      }
+
+      const checked = firstPass.map((c) => (compact && "verdict" in c && c.verdict ? { url: c.url, ...toCompact(c as FullResult) } : c));
+      const worstVerdict = firstPass.reduce<string>(
+        (worst, c) => (c.verdict && order[c.verdict] > (order[worst as Verdict] ?? -1) ? c.verdict : worst),
+        "SAFE",
+      );
       const result = {
         checked,
         worstVerdict,

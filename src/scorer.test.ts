@@ -73,6 +73,18 @@ test("dangerous_scheme (javascript:/data:) -> DANGEROUS", () => {
   assert.equal(computeVerdict(base({ heuristics: [{ id: "dangerous_scheme", severity: "dangerous", detail: "x" }] })).verdict, "DANGEROUS");
 });
 
+test("virustotal_malicious -> DANGEROUS, names the engine count", () => {
+  const r = computeVerdict(base({ feedSignals: [{ matchedValue: "8", source: "VirusTotal", type: "virustotal_malicious" }] }));
+  assert.equal(r.verdict, "DANGEROUS");
+  assert.match(r.verdictReason, /8 VirusTotal engines/);
+});
+
+test("virustotal_suspicious -> SUSPICIOUS, names the engine count", () => {
+  const r = computeVerdict(base({ feedSignals: [{ matchedValue: "2", source: "VirusTotal", type: "virustotal_suspicious" }] }));
+  assert.equal(r.verdict, "SUSPICIOUS");
+  assert.match(r.verdictReason, /2 VirusTotal engines/);
+});
+
 // --- Remaining SUSPICIOUS rules ---
 
 test("abused_tld -> SUSPICIOUS", () => {

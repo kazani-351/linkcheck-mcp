@@ -73,7 +73,7 @@ See `skills/check-url-safety.md` for a companion Skill that teaches Claude to ca
 - Threat intel: [HaGeZi dns-blocklists](https://github.com/hagezi/dns-blocklists) (TIF, Entropy-NRD/DGA, Abused-TLDs, TIF-IPs, URL-Shortener), [URLhaus](https://urlhaus.abuse.ch/) (abuse.ch).
 - Tracker rules: [ClearURLs](https://docs.clearurls.xyz/) catalog.
 - Design inspiration: [URLCheck](https://github.com/TrianguloY/URLCheck) (CC BY 4.0).
-- Optional: [VirusTotal](https://www.virustotal.com/).
+- Optional: [VirusTotal](https://www.virustotal.com/) — active when `VIRUSTOTAL_API_KEY` is set; degrades cleanly if absent.
 
 Commercial/redistribution terms of each source must be verified before any public/commercial use (see SPEC.md §15, §18).
 

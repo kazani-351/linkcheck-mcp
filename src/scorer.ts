@@ -38,11 +38,19 @@ const DANGEROUS_RULES: Rule[] = [
   { test: (i) => hasFeed(i, "threat_intel_ip"), reason: () => "resolved IP is on a threat-intelligence feed" },
   { test: (i) => hasHeuristic(i, "dangerous_scheme"), reason: () => "uses a dangerous URL scheme (javascript:/data:)" },
   { test: (i) => hasHeuristic(i, "embedded_credentials"), reason: () => "disguises its real destination with embedded credentials" },
+  {
+    test: (i) => hasFeed(i, "virustotal_malicious"),
+    reason: (i) => `flagged malicious by ${i.feedSignals.find((s) => s.type === "virustotal_malicious")?.matchedValue} VirusTotal engines`,
+  },
 ];
 
 const SUSPICIOUS_RULES: Rule[] = [
   { test: (i) => hasFeed(i, "abused_tld"), reason: () => "uses a commonly-abused top-level domain" },
   { test: (i) => hasFeed(i, "entropy_nrd"), reason: () => "domain matches a newly-registered, algorithmically-generated pattern (DGA)" },
+  {
+    test: (i) => hasFeed(i, "virustotal_suspicious"),
+    reason: (i) => `flagged suspicious by ${i.feedSignals.find((s) => s.type === "virustotal_suspicious")?.matchedValue} VirusTotal engines`,
+  },
   { test: (i) => hasHeuristic(i, "homograph_mixed_script"), reason: () => "hostname mixes character scripts (possible lookalike attack)" },
   { test: (i) => hasHeuristic(i, "ip_literal_host"), reason: () => "destination is a bare IP address, not a domain name" },
   { test: (i) => hasHeuristic(i, "deceptive_subdomain_depth"), reason: () => "unusually deep subdomain nesting (possible brand impersonation)" },

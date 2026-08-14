@@ -8,6 +8,7 @@ import { _resetBlobCacheForTests } from "./feeds.ts";
 
 const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
 const ENV = { MCP_BEARER_TOKEN: "test-secret" };
+const VT_KEY = process.env.VT_TEST_KEY; // live-gated, see virustotal.test.ts
 
 // Fake D1/KV — verifies the WIRING in index.ts (feed hits actually reach the
 // response DTO), not the feed data itself (that's feeds.test.ts, against real
@@ -38,6 +39,42 @@ function fakeEnv() {
     VERDICT_CACHE: { async get() { return null; } }, // no TIF-domain/IP hits — tested separately in feeds.test.ts
   };
 }
+
+test("check_url wires a real VT hit into DANGEROUS (live, worst-signal already agrees via URLhaus)", { skip: !VT_KEY }, async () => {
+  _resetBlobCacheForTests();
+  const res = await worker.fetch(
+    mcpReq(
+      { jsonrpc: "2.0", id: 20, method: "tools/call", params: { name: "check_url", arguments: { url: "http://27.215.181.39:44858/i" } } },
+      "test-secret",
+    ),
+    { ...fakeEnv(), VIRUSTOTAL_API_KEY: VT_KEY },
+    ctx,
+  );
+  const rpcResult = JSON.parse((await res.text()).split("data: ")[1]);
+  const payload = JSON.parse(rpcResult.result.content[0].text);
+  assert.equal(payload.verdict, "DANGEROUS");
+  assert.ok(payload.feedSignals.some((s: { type: string }) => s.type === "virustotal_malicious"), "expected a real VT malicious hit in feedSignals");
+});
+
+test("check_text only VT-checks the worst candidate, not every URL (live, rate-limit discipline)", { skip: !VT_KEY }, async () => {
+  _resetBlobCacheForTests();
+  const text = "clean: https://anthropic.com/  bad: http://27.215.181.39:44858/i";
+  const res = await worker.fetch(
+    mcpReq(
+      { jsonrpc: "2.0", id: 21, method: "tools/call", params: { name: "check_text", arguments: { text } } },
+      "test-secret",
+    ),
+    { ...fakeEnv(), VIRUSTOTAL_API_KEY: VT_KEY },
+    ctx,
+  );
+  const rpcResult = JSON.parse((await res.text()).split("data: ")[1]);
+  const payload = JSON.parse(rpcResult.result.content[0].text);
+  assert.equal(payload.worstVerdict, "DANGEROUS");
+  const bad = payload.checked.find((c: { url: string }) => c.url.includes("27.215.181.39"));
+  const clean = payload.checked.find((c: { url: string }) => c.url.includes("anthropic.com"));
+  assert.ok(bad.feedSignals.some((s: { type: string }) => s.type === "virustotal_malicious"), "worst candidate should be VT-checked");
+  assert.ok(!clean.feedSignals.some((s: { type: string }) => s.type.startsWith("virustotal")), "clean URL should NOT have consumed a VT call");
+});
 
 function mcpReq(body: unknown, auth?: string): Request {
   const headers: Record<string, string> = {
