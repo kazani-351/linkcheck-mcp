@@ -18,5 +18,11 @@
       "binding": "VERDICT_CACHE",
       "id": "a71b21666a734eee85f4ceb8a9ed508c"
     }
-  ]
+  ],
+  // Daily refresh (SPEC §6/§9/§18 — "daily assumed", may tighten later if
+  // budget allows). 06:17 UTC — off the hour/half-hour to avoid piling onto
+  // everyone else's midnight/top-of-hour cron load.
+  "triggers": {
+    "crons": ["17 6 * * *"]
+  }
 }

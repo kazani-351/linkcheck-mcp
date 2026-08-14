@@ -159,3 +159,38 @@ test("blob cache: kv.get is called once per key, not once per lookup", async () 
   await lookupInBlob(kv, "feed:entropy-nrd", "nope.com", "HaGeZi-Entropy-NRD");
   assert.equal(kv.getCalls, 1, "the blob should be fetched+parsed once, then served from the module cache");
 });
+
+test("blob cache: expires after its TTL, re-fetching so a cron refresh eventually becomes visible", async (t) => {
+  // Real behavior this guards: a cron refresh writes new KV data from a
+  // DIFFERENT Worker isolate than the ones serving live requests, so there's
+  // no cross-isolate "clear the cache now" signal — the TTL is what bounds
+  // staleness instead. Verified deterministically via Node's built-in timer
+  // mocking rather than skipped for being awkward to test.
+  t.mock.timers.enable({ apis: ["Date"] });
+  try {
+    _resetBlobCacheForTests();
+    const store: Record<string, string> = { "feed:tif-domains": "old-evil.com" };
+    const kv = fakeKv(store);
+    assert.equal(await lookupInBlob(kv, "feed:tif-domains", "old-evil.com", "HaGeZi-TIF-domains") !== null, true);
+    assert.equal(kv.getCalls, 1);
+
+    // Still within the TTL (15 min) — cache should NOT refetch.
+    t.mock.timers.tick(10 * 60 * 1000);
+    await lookupInBlob(kv, "feed:tif-domains", "old-evil.com", "HaGeZi-TIF-domains");
+    assert.equal(kv.getCalls, 1, "within TTL: should still be served from cache");
+
+    // Cron "refreshes" the blob (new isolate, real production scenario) while
+    // this isolate's cache is still holding the stale Set.
+    store["feed:tif-domains"] = "new-evil.com";
+
+    // Past the TTL — next lookup should refetch and pick up the new data.
+    t.mock.timers.tick(6 * 60 * 1000); // total 16 min, past the 15 min TTL
+    const staleHit = await lookupInBlob(kv, "feed:tif-domains", "old-evil.com", "HaGeZi-TIF-domains");
+    const freshHit = await lookupInBlob(kv, "feed:tif-domains", "new-evil.com", "HaGeZi-TIF-domains");
+    assert.equal(kv.getCalls, 2, "past TTL: should have refetched");
+    assert.equal(staleHit, null, "the old entry should no longer match — the refresh is now visible");
+    assert.ok(freshHit, "the newly-refreshed entry should now match");
+  } finally {
+    t.mock.timers.reset();
+  }
+});

@@ -31,12 +31,20 @@ function fakeEnv() {
                 }
                 return { results: [] as T[] };
               },
+              // Minimal no-op write path — sufficient for the /admin/refresh-feeds
+              // wiring test; refresh.test.ts covers real diff/write semantics.
+              async run() {
+                return { success: true };
+              },
             };
           },
         };
       },
     },
-    VERDICT_CACHE: { async get() { return null; } }, // no TIF-domain/IP hits — tested separately in feeds.test.ts
+    VERDICT_CACHE: {
+      async get() { return null; }, // no TIF-domain/IP hits — tested separately in feeds.test.ts
+      async put() {}, // no-op — refresh.test.ts covers real KV-write semantics
+    },
   };
 }
 
@@ -266,4 +274,59 @@ test("check_text end-to-end: extracts and checks multiple URLs from a blob", asy
   assert.deepEqual(cleanOne.removedParams, ["utm_source"]);
   const badOne = payload.checked.find((c: { url: string }) => c.url.includes("169.254"));
   assert.ok(badOne.heuristics.some((h: { id: string }) => h.id === "ip_literal_host"));
+});
+
+// --- /admin/refresh-feeds ---
+// refresh.test.ts already covers the diff/write logic thoroughly against fake
+// D1/KV; these tests only confirm the ROUTE (auth gate, method, response shape,
+// wiring to refreshAllFeeds). A temporary global fetch override keeps this fast
+// and independent of real network / the live feed sources being reachable.
+
+async function withFakeFetch<T>(canned: string, run: () => Promise<T>): Promise<T> {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(canned)) as typeof fetch;
+  try {
+    return await run();
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+test("POST /admin/refresh-feeds without auth -> 401", async () => {
+  const res = await worker.fetch(
+    new Request("http://localhost/admin/refresh-feeds", { method: "POST" }),
+    ENV,
+    ctx,
+  );
+  assert.equal(res.status, 401);
+});
+
+test("POST /admin/refresh-feeds without D1/KV bindings -> 503", async () => {
+  const res = await worker.fetch(
+    new Request("http://localhost/admin/refresh-feeds", {
+      method: "POST",
+      headers: { authorization: "Bearer test-secret" },
+    }),
+    ENV,
+    ctx,
+  );
+  assert.equal(res.status, 503);
+});
+
+test("POST /admin/refresh-feeds with valid auth + bindings runs the refresh and returns all 6 outcomes", async () => {
+  _resetBlobCacheForTests();
+  const result = await withFakeFetch("example.com\n", () =>
+    worker.fetch(
+      new Request("http://localhost/admin/refresh-feeds", {
+        method: "POST",
+        headers: { authorization: "Bearer test-secret" },
+      }),
+      fakeEnv(),
+      ctx,
+    ),
+  );
+  assert.equal(result.status, 200);
+  const body = (await result.json()) as { results: Array<{ source: string; status: string }> };
+  assert.equal(body.results.length, 6);
+  assert.ok(body.results.every((r) => r.status === "ok"));
 });

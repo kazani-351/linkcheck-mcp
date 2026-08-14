@@ -100,7 +100,7 @@ Cloudflare Worker  ── createMcpHandler(() => createServer(env)), built fresh
    │            in-memory Set cached at module scope per blob
    ├─ scorer.ts: tiered rules → verdict + evidence (SPEC §8) — BUILT + deployed,
    │             verified against the full live golden set (§12)
-   └─ (optional) VirusTotal client (degradeable)          [NOT YET BUILT]
+   └─ virustotal.ts: real VT client (degradeable) — BUILT + live
    ▲
    │  bindings
    ▼
@@ -109,7 +109,14 @@ D1 "linkcheck-mcp-feeds" ── feed_urls_exact (15,870), feed_domains/shortener
 KV "linkcheck-mcp-cache" ── feed:tif-domains (166,569, 3.0MB blob),
    feed:tif-ips (62,236, 0.9MB), feed:entropy-nrd (582,153, 13.8MB) —
    one PUT per refresh; verdict:<hash> cache keys land here too [NOT YET BUILT]
-Cron Trigger (daily refresh)                                    [NOT YET BUILT]
+Cron Trigger (17 6 * * * daily) — refresh.ts: BUILT + live. D1 feeds
+   diffed (added/removed only, chunked at 40 rows/statement — D1's real
+   bound-parameter ceiling is 100, not SQLite's 999 default); KV feeds
+   full-overwrite (one PUT). Promise.allSettled isolates failures per
+   source; feed_meta records "error: <msg>" rather than silently
+   skipping a dead upstream. POST /admin/refresh-feeds (bearer-gated,
+   same token) triggers it manually — needed because wrangler dev can't
+   fire a real cron tick on this machine, doubles as a real "refresh now."
 ```
 
 - **Framework:** **`createMcpHandler`** (stateless) from `agents/mcp/server`, on **MCP SDK v2** (`@modelcontextprotocol/server@2.0.0`). Cloudflare's officially recommended path for new stateless tools — no Durable Object, simplest setup. A fresh `McpServer` is built per request via a factory; durable data lives in D1/KV (not an MCP session). *Rejected:* **McpAgent** — now deprecated/feature-frozen, Durable-Object-backed (stateful machinery we don't need; `check_url`/`check_text` hold zero session state). *Rejected:* raw `WebStandardStreamableHTTPServerTransport` / raw `@modelcontextprotocol/sdk` — full control but owns Workers-execution-model handling the wrapper gives free (raw transport is known to hang on Workers).
@@ -301,7 +308,7 @@ Shortlist: `linkcheck-mcp` · `unfurl` · `saferesolve` · `urlens` (reuses a pa
 - **Public-phase shape:** direction = free public good + portfolio piece; monetization (freemium?) undecided. Billing/quota/multi-token model unspecified.
 - **HaGeZi/URLhaus/ClearURLs commercial terms** for the public phase — must be resolved before going public (hard gate, §15).
 - ~~**Entropy-NRD/DGA subset size** vs D1 write ceiling~~ — **RESOLVED (§6, §20):** real sizes forced the KV-blob pivot for all three large feeds; no longer a D1 concern.
-- **Cron diff-refresh for the Tier-2 KV blobs** — not yet built. Since a full-blob overwrite is cheap (one PUT), this is likely simpler than originally planned (no diff logic needed, just refetch-and-replace on schedule) — but the cron itself, and its failure/staleness handling for KV blobs specifically, is unbuilt.
+- ~~**Cron diff-refresh for the Tier-2 KV blobs**~~ — **RESOLVED:** built as full-overwrite (no diff needed, confirmed simpler as predicted). `refresh.ts`, live and verified against production.
 - **VirusTotal rate-limit strategy** under any future shared use (fine for personal; unspecified for public).
 - **Cron cadence tuning** — daily assumed; may tighten if feeds update faster and budget allows.
 - **RDAP necessity** — only revisited if NRD proves too coarse in practice.
@@ -365,4 +372,9 @@ Plus one scope-*reducing* correction: the **SSRF guard was over-built for the Wo
 ### VirusTotal integration — bug and a known limitation
 
 18. **`check_text`'s worst-candidate selector picked the wrong URL when severities tied** — the selector uses strict `>` (first-among-equals wins). In a test using an incomplete env (missing D1/KV bindings), *every* URL degraded under AC1 to at least SUSPICIOUS, tying a genuinely clean URL with a genuinely malicious one — and the clean one, appearing first in the text, won the tie and got the VT re-check instead of the real threat. Root cause was a test-setup bug (bare `ENV` instead of `fakeEnv()`, an artificial degradation-driven tie), not a fundamental code defect — with real bindings, only genuine signal ties are possible. **Known, accepted limitation left as-is:** under a real feed outage in production, two URLs could still tie at SUSPICIOUS purely from degradation, and the arbitrary first-wins tiebreak could pick the less-interesting one for the scarce VT call. Not fixed — doesn't compromise the safety property (the non-VT-checked URL still surfaces at its correct minimum severity via AC1), and richer tie-break logic wasn't judged worth the complexity for v1. Revisit if it proves wrong in practice.
+
+### Cron feed refresh — bug found live in production, plus a design addition
+
+19. **D1's real bound-parameter limit (100) is far stricter than SQLite's default (999), and the failure is silent until a feed actually has diff churn** — the initial chunk size (400 rows/statement, 800 params for INSERT) passed every test, because the test diffs were tiny (1-2 rows) and the first two production feeds checked (`HaGeZi-Shortener`, `HaGeZi-AbusedTLD`) both happened to have *zero* diff that run — their batch-write code path never executed at all. Only `URLhaus` — the one live, continuously-updated feed — had real churn, and only it hit `D1_ERROR: too many SQL variables`. Found via the manual `/admin/refresh-feeds` trigger against real production data, not a unit test. Verified the correct limit against Cloudflare's own docs (100 bound params/query) before picking a fix, then reduced `CHUNK` to 40 (80/41 params for INSERT/DELETE respectively). Added a test that forces a 90-row diff specifically to exercise multi-chunk writes — the class of test the original tiny-diff tests couldn't have caught — **and enforced the same 100-param ceiling inside the test fake itself**, so a future regression to an oversized `CHUNK` fails in `npm test`, not in production against a live feed with real churn.
+20. **A cron refresh writes new KV data from a different Worker isolate than the ones serving live requests — there is no cross-isolate cache-invalidation signal available to application code.** The module-scope blob `Set` cache (added in Slice 6 as a plain "load once per isolate" cache, no expiry) would have made a refresh invisible to already-warm isolates for however long they stayed alive. Added a 15-minute TTL as part of building the refresh feature — not a separate fix, but a real correctness requirement for the feature to actually do what it claims. Verified deterministically with Node's built-in `t.mock.timers` (mocking `Date`) rather than left untested for being awkward to test with real wall-clock waits: within-TTL cache hit, past-TTL refetch, refetch correctly observes a same-key value change (simulating the cron-writes/isolate-reads split).
 ```

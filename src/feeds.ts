@@ -14,6 +14,18 @@ export interface MinimalD1 {
   };
 }
 
+/** Write-capable D1 slice — used by refresh.ts (cron ingestion), not the
+ *  read-only lookup functions below. Kept separate so lookupX() signatures
+ *  stay obviously read-only. */
+export interface WritableD1 extends MinimalD1 {
+  prepare(sql: string): {
+    bind(...values: unknown[]): {
+      all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
+      run(): Promise<{ success: boolean }>;
+    };
+  };
+}
+
 export interface FeedHit {
   matchedValue: string; // the exact row that matched (e.g. "evil.com" for a lookup on "login.evil.com")
   source: string;
@@ -102,15 +114,27 @@ export interface MinimalKV {
   get(key: string): Promise<string | null>;
 }
 
-const blobSetCache = new Map<string, Set<string>>();
+/** Write-capable KV slice — used by refresh.ts, not the read-only lookups. */
+export interface WritableKV extends MinimalKV {
+  put(key: string, value: string): Promise<void>;
+}
+
+// TTL, not "forever" — a cron refresh writes new KV data from a DIFFERENT
+// Worker isolate than the ones serving live requests (Workers run many
+// parallel isolates across the edge; there's no cross-isolate cache-clear
+// signal available to application code). Without a TTL, a refreshed blob
+// could stay invisible to a given isolate indefinitely. 15 min bounds the
+// worst-case staleness to well under the daily refresh cadence itself.
+const BLOB_CACHE_TTL_MS = 15 * 60 * 1000;
+const blobSetCache = new Map<string, { set: Set<string>; loadedAt: number }>();
 
 async function loadBlobSet(kv: MinimalKV, key: string): Promise<Set<string>> {
   const cached = blobSetCache.get(key);
-  if (cached) return cached;
+  if (cached && Date.now() - cached.loadedAt < BLOB_CACHE_TTL_MS) return cached.set;
 
   const raw = await kv.get(key);
   const set = new Set(raw ? raw.split("\n").filter(Boolean) : []);
-  blobSetCache.set(key, set);
+  blobSetCache.set(key, { set, loadedAt: Date.now() });
   return set;
 }
 

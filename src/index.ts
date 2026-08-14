@@ -14,20 +14,22 @@ import {
   lookupDomainInBlob,
   lookupInBlob,
   type FeedHit,
-  type MinimalD1,
-  type MinimalKV,
+  type WritableD1,
+  type WritableKV,
 } from "./feeds.ts";
 import { computeVerdict, type Verdict } from "./scorer.ts";
 import { checkVirusTotal } from "./virustotal.ts";
+import { refreshAllFeeds } from "./refresh.ts";
 
-// Typed against the minimal interfaces feeds.ts actually uses (prepare/bind/all,
-// get) rather than the full D1Database/KVNamespace surface — a real Cloudflare
-// binding satisfies this structurally, and it lets tests use lightweight fakes
-// without casting away type safety.
+// Typed against the minimal (but write-capable, for the cron refresh path)
+// interfaces feeds.ts/refresh.ts actually use, rather than the full
+// D1Database/KVNamespace surface — a real Cloudflare binding satisfies this
+// structurally, and it lets tests use lightweight fakes without casting away
+// type safety.
 interface Env {
   MCP_BEARER_TOKEN?: string;
-  FEEDS_DB?: MinimalD1;
-  VERDICT_CACHE?: MinimalKV;
+  FEEDS_DB?: WritableD1;
+  VERDICT_CACHE?: WritableKV;
   VIRUSTOTAL_API_KEY?: string;
 }
 
@@ -224,36 +226,61 @@ function createServer(env: Env): McpServer {
 
 export { createServer };
 
+async function readFeedMeta(env: Env): Promise<unknown> {
+  if (!env.FEEDS_DB) return "unavailable (D1 not bound)";
+  try {
+    const { results } = await env.FEEDS_DB.prepare(
+      "SELECT source, last_refresh, last_status, entry_count FROM feed_meta",
+    )
+      .bind()
+      .all();
+    return results;
+  } catch (e) {
+    return `error reading feed_meta: ${(e as Error).message}`;
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const { pathname } = new URL(request.url);
 
     if (pathname === "/health") {
-      let feeds: unknown = "unavailable (D1 not bound)";
-      if (env.FEEDS_DB) {
-        try {
-          const { results } = await env.FEEDS_DB.prepare(
-            "SELECT source, last_refresh, last_status, entry_count FROM feed_meta",
-          )
-            .bind()
-            .all();
-          feeds = results;
-        } catch (e) {
-          feeds = `error reading feed_meta: ${(e as Error).message}`;
-        }
-      }
-      return Response.json({ status: "ok", service: "linkcheck-mcp", version: "0.1.0", feeds });
+      return Response.json({ status: "ok", service: "linkcheck-mcp", version: "0.1.0", feeds: await readFeedMeta(env) });
     }
 
-    // Bearer gate BEFORE the MCP handler — createMcpHandler does not verify tokens (SPEC §11).
+    // Bearer gate BEFORE any protected route — createMcpHandler does not verify
+    // tokens itself (SPEC §11), and the admin route below is equally sensitive
+    // (it makes real writes to D1/KV) so it shares the same gate, not a second one.
     const token = env.MCP_BEARER_TOKEN;
     if (token && request.headers.get("authorization") !== `Bearer ${token}`) {
       return new Response("unauthorized", { status: 401 });
+    }
+
+    // Manual refresh trigger — exists because local wrangler dev can't fire a
+    // real cron tick on this machine (workerd requires macOS 13.5+), so this is
+    // also how the refresh logic gets verified against production. Doubles as a
+    // genuine "force refresh now" if a feed goes stale before the next schedule.
+    if (pathname === "/admin/refresh-feeds" && request.method === "POST") {
+      if (!env.FEEDS_DB || !env.VERDICT_CACHE) {
+        return Response.json({ error: "D1/KV bindings not configured" }, { status: 503 });
+      }
+      const results = await refreshAllFeeds(env.FEEDS_DB, env.VERDICT_CACHE, Date.now());
+      const anyFailed = results.some((r) => r.status === "error");
+      return Response.json({ results }, { status: anyFailed ? 207 : 200 });
     }
 
     // Built fresh per request so tool handlers can close over this request's env
     // (bindings aren't available via the McpServer factory's own context) — fine
     // per SPEC/docs since we don't use notify()/list-changed events.
     return createMcpHandler(() => createServer(env))(request, env, ctx);
+  },
+
+  // Cloudflare Cron Trigger entrypoint (wrangler.jsonc `triggers.crons`). Runs in
+  // its own isolate on Cloudflare's schedule — ctx.waitUntil extends execution
+  // past the point scheduled() itself returns, since the refresh (6 feeds, one
+  // up to ~14MB) takes longer than a bare invocation is guaranteed to stay alive.
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    if (!env.FEEDS_DB || !env.VERDICT_CACHE) return; // nothing to refresh without bindings
+    ctx.waitUntil(refreshAllFeeds(env.FEEDS_DB, env.VERDICT_CACHE, Date.now()).then(() => undefined));
   },
 };
