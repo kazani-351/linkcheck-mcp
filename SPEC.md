@@ -82,22 +82,33 @@ Inspired by the Android app **URLCheck** (TrianguloY), but re-shaped for an agen
 Claude (any surface)
    │  MCP over streamable HTTP  (bearer token)
    ▼
-Cloudflare Worker  ── createMcpHandler (stateless, MCP SDK v2)
+Cloudflare Worker  ── createMcpHandler(() => createServer(env)), built fresh per
+   │                  fetch() call so tool handlers close over env/bindings —
+   │                  factory itself has no env access (§20 bug #7 finding)
    │  fetch() wrapper verifies bearer token, then delegates to handler
    ├─ check_url(url, {compact?})            request path
    ├─ check_text(text, {compact?})          request path
-   ├─ /health                               ops/smoke
-   ├─ resolver: HEAD hops, cap, SSRF guard, DNS→IP
+   ├─ /health                               surfaces feed_meta freshness, all 6 feeds
+   ├─ resolver: HEAD hops, cap, SSRF guard (literal IPs only)
+   ├─ dns.ts: DNS-over-HTTPS (fetch to cloudflare-dns.com) — resolves a domain to
+   │          an IP for the TIF-IPs check; skipped entirely for already-literal
+   │          IP hosts (§20 bug #12)
    ├─ heuristics: pattern engine (pure logic)
    ├─ cleaner: ClearURLs rules + query decode
-   ├─ scorer: tiered rules → verdict + evidence
-   ├─ cache: verdict by resolved URL, 1h TTL      → KV or D1 (see §6)
-   └─ (optional) VirusTotal client (degradeable)
+   ├─ feeds.ts: D1 lookups (exact-URL, shortener, abused-TLD) +
+   │            KV-blob lookups (TIF-domains, TIF-IPs, Entropy-NRD),
+   │            in-memory Set cached at module scope per blob
+   ├─ scorer: tiered rules → verdict + evidence          [NOT YET BUILT — next slice]
+   └─ (optional) VirusTotal client (degradeable)          [NOT YET BUILT]
    ▲
    │  bindings
    ▼
-D1 (SQLite)  ── feeds (domains, IPs, shorteners, abused-TLDs, NRD, clearurls rules), meta (per-feed last_refresh)
-Cron Trigger (daily) ── diff-refresh each feed into D1; purge/update meta; (v1.1) purge history >90d
+D1 "linkcheck-mcp-feeds" ── feed_urls_exact (15,870), feed_domains/shortener-only
+   (9,815), feed_tlds (445), feed_meta (all 6 feeds' freshness)
+KV "linkcheck-mcp-cache" ── feed:tif-domains (166,569, 3.0MB blob),
+   feed:tif-ips (62,236, 0.9MB), feed:entropy-nrd (582,153, 13.8MB) —
+   one PUT per refresh; verdict:<hash> cache keys land here too [NOT YET BUILT]
+Cron Trigger (daily refresh)                                    [NOT YET BUILT]
 ```
 
 - **Framework:** **`createMcpHandler`** (stateless) from `agents/mcp/server`, on **MCP SDK v2** (`@modelcontextprotocol/server@2.0.0`). Cloudflare's officially recommended path for new stateless tools — no Durable Object, simplest setup. A fresh `McpServer` is built per request via a factory; durable data lives in D1/KV (not an MCP session). *Rejected:* **McpAgent** — now deprecated/feature-frozen, Durable-Object-backed (stateful machinery we don't need; `check_url`/`check_text` hold zero session state). *Rejected:* raw `WebStandardStreamableHTTPServerTransport` / raw `@modelcontextprotocol/sdk` — full control but owns Workers-execution-model handling the wrapper gives free (raw transport is known to hang on Workers).
@@ -110,21 +121,28 @@ Cron Trigger (daily) ── diff-refresh each feed into D1; purge/update meta; (
 
 ## 6. Data Model (D1)
 
-- `feed_domains(domain TEXT PRIMARY KEY, source TEXT)` — TIF, **Entropy-NRD/DGA subset** (not full NRD — see below), abused-TLD, shortener, and URLhaus **host-level** domains. Indexed on `domain`.
-- `feed_ips(ip TEXT PRIMARY KEY, source TEXT)` — TIF-IPs.
-- `feed_urls_exact(url TEXT PRIMARY KEY)` — URLhaus **exact-URL** entries (rare-hit but high-confidence when they do).
-- `clearurls_rules(...)` — parsed ClearURLs param/redirect rules.
-- `feed_meta(source TEXT PRIMARY KEY, last_refresh INTEGER, last_status TEXT, entry_count INTEGER)` — freshness + observability.
+**Real architecture (verified + deployed, §20 bug-fix log has the full story) — a two-tier split, not the originally-drafted single D1 design:**
+
+**Tier 1 — small feeds → D1 row-per-entry** (all comfortably under the ~100k-writes/day ceiling, confirmed by real download):
+- `feed_domains(domain TEXT PRIMARY KEY, source TEXT)` — **HaGeZi URL-Shortener domains only** (9,815 rows). *(Originally drafted to also hold TIF/NRD — moved out once real sizes were known; see Tier 2.)*
+- `feed_urls_exact(url TEXT PRIMARY KEY, source TEXT)` — URLhaus **exact-URL** entries (15,870 rows).
+- `feed_tlds(tld TEXT PRIMARY KEY, source TEXT)` — HaGeZi Most-Abused-TLDs (445 rows). New table, not in the original draft — abused-TLD is a suffix match, a different shape than domain matching.
+- `feed_meta(source TEXT PRIMARY KEY, last_refresh INTEGER, last_status TEXT, entry_count INTEGER)` — freshness + observability, covers **all six** feeds (both tiers), surfaced at `/health`.
+- ~~`feed_ips`~~ — dropped (migration 0003); superseded by Tier 2.
 - **v1.1:** `allowlist(domain, note)`, `blocklist(domain, note)`, `history(id, resolved_url_or_redacted, verdict, ts)`.
-- **Verdict cache:** KV (`verdict:<sha256(NORMALIZED_INPUT_url)>` → JSON, TTL 3600). **Keyed on the input URL, not the resolved URL** — so a cache hit skips the expensive HEAD resolution entirely (the whole point of the cache; see bug-fix log §20). KV chosen over D1 to avoid write churn; feeds stay in D1 for indexed lookups + SQL. This is the one place two stores are used, deliberately.
 
-**Domain matching = parent-label walk (not exact match).** Every domain lookup checks the full host AND each parent domain against `feed_domains`: `login.evil.com` → `evil.com` → matches if any listed. Exact-PK match alone would let any subdomain evade the blocklist. (Registrable-domain boundary via a public-suffix check to avoid matching bare TLDs.)
+**Tier 2 — large feeds → one KV blob per feed, not D1 rows.** Real download sizes made the original "TIF-Mini + diff-refresh" D1 plan infeasible before any code was written: TIF-domains is **166,569** entries, TIF-IPs **62,236**, and even the smallest Entropy-NRD/DGA window (7-day) is **582,153** — combined, over 2× the daily D1 write ceiling in a single seed, let alone ongoing diffs. Fix: store each as **one KV value** (newline-joined domain/IP list; sizes 3.0MB / 0.9MB / 13.8MB respectively, all well under KV's 25MB/value cap) — **one `PUT` per refresh regardless of list size**, which also means diff-based refresh logic is unnecessary for these three (a full-blob overwrite *is* the cheap operation here, unlike D1 rows). Parsed into an in-memory `Set` and **cached at module scope** so a 582k-entry blob isn't re-parsed on every request within a warm isolate (`src/feeds.ts`, `loadBlobSet`).
+- `feed:tif-domains`, `feed:tif-ips`, `feed:entropy-nrd` (KV keys under the `VERDICT_CACHE` namespace, same namespace as the verdict cache below — one KV namespace, prefixed keys, not a separate namespace per concern).
 
-**URLhaus is split by precision:** an **exact-URL** hit (`feed_urls_exact`) → DANGEROUS. A **domain-only** URLhaus/host hit → SUSPICIOUS, not DANGEROUS — URLhaus frequently lists malware URLs on *compromised-but-legit* hosts, so flagging the whole domain as dangerous would false-positive legitimate sites.
+**Verdict cache:** KV (`verdict:<sha256(NORMALIZED_INPUT_url)>` → JSON, TTL 3600). **Keyed on the input URL, not the resolved URL** — so a cache hit skips the expensive HEAD resolution entirely (the whole point of the cache; see bug-fix log §20). *(Not yet implemented — feed lookups ship in this slice, verdict caching is a later slice once scoring exists.)*
 
-**NRD:** use HaGeZi's **Entropy-NRD/DGA subset**, not full NRD. Full NRD is a rolling window whose *daily diff* is inherently huge (large add + large drop-off), which would blow D1's ~100k-writes/day ceiling on its own — defeating diff-refresh. The Entropy/DGA cut is far smaller and targets the algorithmically-generated domains that are the actual threat-actor signal.
+**Domain matching = parent-label walk (not exact match)**, both tiers: every domain lookup checks the full host AND each parent domain — `login.evil.com` → `evil.com` → matches if any listed. Exact-PK match alone would let any subdomain evade the blocklist. (No public-suffix-list dependency in v1 — floor is "≥2 labels," so a bare TLD can never match; a rare over-broad match on a two-label TLD like `co.uk` is a missed edge case, not a false-safe.)
 
-**Diff-refresh:** each daily cron pulls the source, computes added/removed vs current D1 rows, writes only the delta → stays under D1's ~100k-writes/day free ceiling. Full-replace rejected (blows write budget). Feed sizes (esp. Entropy-NRD, TIF-Mini) verified against the ceiling at build.
+**URLhaus is split by precision:** an **exact-URL** hit (`feed_urls_exact`) → DANGEROUS-tier signal. A **domain-only** hit (via `feed_domains`/TIF-domains blob) → SUSPICIOUS-tier — URLhaus frequently lists malware URLs on *compromised-but-legit* hosts, so flagging the whole domain as dangerous would false-positive legitimate sites.
+
+**IP-reputation requires a real DNS lookup — Workers has no raw DNS API.** The original draft assumed "the resolved IP" was already available from the SSRF guard; it wasn't — the resolver's guard only catches *literal* IP hostnames already in a URL, it never resolves a domain name. Fixed via DNS-over-HTTPS (`src/dns.ts`, plain `fetch()` to `cloudflare-dns.com/dns-query`) — one extra network hop per check, not "free" as first assumed. **Real bug caught in production testing:** an IP-literal URL (e.g. `http://27.215.181.39/x`) was unconditionally sent through DoH resolution, which correctly finds no A record for something that's already an IP — silently skipping the TIF-IPs feed check entirely for every IP-literal URL. Fixed: `isIpLiteral()` check skips DoH and looks the literal IP up directly (§20).
+
+**NRD:** HaGeZi's **Entropy-NRD/DGA, 7-day window** (smallest available; 14/30-day windows are 2×/4×+ bigger) — confirmed via §20 as the smallest viable cut, handled via the Tier-2 KV-blob pattern like the other large feeds.
 
 ---
 
@@ -279,7 +297,8 @@ Shortlist: `linkcheck-mcp` · `unfurl` · `saferesolve` · `urlens` (reuses a pa
 
 - **Public-phase shape:** direction = free public good + portfolio piece; monetization (freemium?) undecided. Billing/quota/multi-token model unspecified.
 - **HaGeZi/URLhaus/ClearURLs commercial terms** for the public phase — must be resolved before going public (hard gate, §15).
-- **Entropy-NRD/DGA subset size** vs D1 write ceiling — decided to use the subset (§6); still verify its real daily-diff size against the ~100k-writes ceiling at build, and confirm TIF-Mini + all feeds together fit.
+- ~~**Entropy-NRD/DGA subset size** vs D1 write ceiling~~ — **RESOLVED (§6, §20):** real sizes forced the KV-blob pivot for all three large feeds; no longer a D1 concern.
+- **Cron diff-refresh for the Tier-2 KV blobs** — not yet built. Since a full-blob overwrite is cheap (one PUT), this is likely simpler than originally planned (no diff logic needed, just refetch-and-replace on schedule) — but the cron itself, and its failure/staleness handling for KV blobs specifically, is unbuilt.
 - **VirusTotal rate-limit strategy** under any future shared use (fine for personal; unspecified for public).
 - **Cron cadence tuning** — daily assumed; may tighten if feeds update faster and budget allows.
 - **RDAP necessity** — only revisited if NRD proves too coarse in practice.
@@ -304,6 +323,9 @@ Shortlist: `linkcheck-mcp` · `unfurl` · `saferesolve` · `urlens` (reuses a pa
 | Stale feeds | serve + surface age | silent-stale; hard-fail (infra hiccup kills tool) |
 | QR | model decodes (doc) | server-side decode (image dep + SSRF) |
 | Cert/DNS-deep | out | awkward in Workers / weak signal / low ROI |
+| Large-feed storage | One KV blob per feed, in-memory Set, module-scope cache | D1 row-per-entry (original plan — real sizes made it infeasible: 166K/62K/582K rows vs ~100K/day ceiling) |
+| IP resolution | DNS-over-HTTPS via fetch() to cloudflare-dns.com | node:dns (unavailable in Workers without extra compat surface); assuming "free" from SSRF guard (wrong — guard never resolves domains) |
+| Abused-TLD storage | New `feed_tlds` table, suffix match | Reusing `feed_domains` (wrong shape — TLDs aren't domains, suffix match ≠ parent-label walk) |
 
 ---
 
@@ -320,4 +342,15 @@ Seven design bugs caught reviewing the spec *before* the premise grill:
 7. **NRD would blow D1 write ceiling** — rolling-window daily diff is inherently huge. Switched to Entropy-NRD/DGA subset. (§6)
 
 Plus one scope-*reducing* correction: the **SSRF guard was over-built for the Workers edge** (no adjacent private network) — right-sized to a lightweight defense-in-depth check. (§11)
+
+### Slice 6 (feeds/D1/KV) — bugs and real findings, caught during build + production testing
+
+8. **SQL generator produced one value per character, not per row** — the default `transform=lambda x: [x]` returned a bare string; iterating a Python string yields its characters. Caught immediately (SQLite's own "all VALUES must have the same number of terms" check failed loud before any bad data was written — no corruption occurred). Fixed the generator, not a database.
+9. **D1's original single-tier design was infeasible before any code ran** — real downloads showed TIF-domains (166,569), TIF-IPs (62,236), and even the smallest Entropy-NRD window (582,153) all dwarf D1's ~100k-writes/day ceiling, both combined AND individually for the two biggest. Pivoted to a KV-blob tier for large feeds (§6) — a mid-build architecture change, confirmed with the user before implementing (AskUserQuestion, not silent).
+10. **Abused-TLD data isn't domain-shaped** — it's bare TLD suffixes (`actor`, `africa`, ...), not full domains; storing it in `feed_domains` and parent-label-walking it would have been semantically wrong even though it wouldn't have errored. Caught before writing the ingestion code, not after — added `feed_tlds` with suffix-match semantics instead.
+11. **IP-reputation assumed "the resolved IP" already existed for free** — it didn't. The resolver's SSRF guard only recognizes literal IPs already in a URL; nothing in the codebase resolved a domain name to an IP. DNS-over-HTTPS via `fetch()` closes the gap (verified live before committing to it), but this is a real extra network hop, not the zero-cost reuse originally assumed.
+12. **IP-literal URLs silently skipped IP-reputation checking** — found via a *live production probe* against a real URLhaus IP-literal URL, not a unit test: `resolvedIp` came back `null` with `degraded: ["no A record found"]`, because DoH was called unconditionally even when the host was already a bare IP (there's nothing to resolve). Fixed by checking `isIpLiteral()` first and looking the literal IP up directly. This one would have shipped invisibly — no test had exercised an IP-literal URL against a live feed before the prod probe caught it.
+13. **Module-scope blob cache leaked between tests** — `blobSetCache` is keyed only by blob-key string, correct for production (one KV binding per isolate) but wrong for tests using different fake KV instances under the same key name. An earlier test's empty-KV fake poisoned the cache for a later test expecting real data. `_resetBlobCacheForTests()` existed for this exact reason and was simply forgotten on a new test — added it, and to the other KV-touching tests for order-independence.
+14. **A bad test IP (`203.0.113.5`, RFC 5737 TEST-NET-3) caused a real 10-second hang** — unroutable but outside the SSRF guard's blocked ranges, so `resolveUrl` actually attempted a live fetch and waited out the timeout. Switched to a link-local address the guard short-circuits instantly — the lesson: a "safe-sounding" test IP still needs to be one your own code actually recognizes as unsafe, or it just hits the network.
+15. **Cloudflare deploy/secret propagation is not instant** — a curl immediately after `wrangler deploy` returned a transient 404; a curl immediately after `wrangler secret put` transiently bypassed the just-set auth gate (hit a stale edge node still running the pre-secret Worker version). Both resolved within seconds on retry. Real risk: trusting a single post-mutation security check as final. Now a standing CLAUDE.md gotcha — retry 3-5x before concluding a post-deploy auth check failed or passed.
 ```

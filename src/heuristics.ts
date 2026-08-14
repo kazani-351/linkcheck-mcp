@@ -37,8 +37,10 @@ function scriptsInHost(host: string): Set<string> {
   return scripts;
 }
 
-/** True if the hostname is a bare IPv4 or IPv6 literal (no domain name at all). */
-function isIpLiteral(hostname: string): boolean {
+/** True if the hostname is a bare IPv4 or IPv6 literal (no domain name at all).
+ *  Exported: index.ts also needs this to skip a pointless DoH lookup on an
+ *  already-literal IP and check it against the IP-reputation feed directly. */
+export function isIpLiteral(hostname: string): boolean {
   const h = hostname.replace(/^\[|\]$/g, "");
   if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
   if (h.includes(":") && /^[0-9a-f:]+$/i.test(h)) return true; // IPv6

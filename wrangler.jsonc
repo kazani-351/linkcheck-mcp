@@ -1,10 +1,22 @@
 {
-  // Slice 2: bare MCP integration. D1/KV/Cron bindings added in later slices.
   "name": "linkcheck-mcp",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-01",
   // Required by the `agents` package (imports node:async_hooks) and by our own
   // punycode/IDN decoding in heuristics.ts (node:url domainToUnicode).
   "compatibility_flags": ["nodejs_compat"],
-  "observability": { "enabled": true }
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "FEEDS_DB",
+      "database_name": "linkcheck-mcp-feeds",
+      "database_id": "233ab177-47aa-425e-a03c-39a459363d72"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "VERDICT_CACHE",
+      "id": "a71b21666a734eee85f4ceb8a9ed508c"
+    }
+  ]
 }

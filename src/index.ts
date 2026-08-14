@@ -1,47 +1,113 @@
 // linkcheck-mcp Worker entrypoint (SPEC §5, §7, §11).
-// Slice 2: stateless createMcpHandler exposing check_url (resolver only), behind a
-// bearer gate, with a /health endpoint. Verdict/feeds/heuristics come in later slices.
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { resolveUrl } from "./resolver.ts";
 import { cleanUrl } from "./cleaner.ts";
-import { runHeuristics } from "./heuristics.ts";
+import { runHeuristics, isIpLiteral } from "./heuristics.ts";
 import { extractUrls } from "./extract.ts";
+import { resolveIp } from "./dns.ts";
+import {
+  lookupDomain,
+  lookupExactUrl,
+  lookupTld,
+  lookupDomainInBlob,
+  lookupInBlob,
+  type FeedHit,
+  type MinimalD1,
+  type MinimalKV,
+} from "./feeds.ts";
 
+// Typed against the minimal interfaces feeds.ts actually uses (prepare/bind/all,
+// get) rather than the full D1Database/KVNamespace surface — a real Cloudflare
+// binding satisfies this structurally, and it lets tests use lightweight fakes
+// without casting away type safety.
 interface Env {
   MCP_BEARER_TOKEN?: string;
+  FEEDS_DB?: MinimalD1;
+  VERDICT_CACHE?: MinimalKV;
 }
 
-// Shared by check_url and check_text — resolve, clean, and heuristically inspect
-// one URL. Scoring/verdict (SPEC §8) lands in a later slice; for now this returns
-// the raw signals each tool needs.
-async function checkOneUrl(url: string) {
+// Shared by check_url and check_text — resolve, clean, heuristically inspect, and
+// check threat feeds for one URL. Scoring/verdict (SPEC §8) lands in a later
+// slice; for now this returns the raw signals each tool needs.
+async function checkOneUrl(url: string, env: Env) {
   const resolved = await resolveUrl(url);
   const cleaned = cleanUrl(resolved.finalUrl);
   const heuristics = runHeuristics(resolved.finalUrl);
+
+  const feedSignals: Array<FeedHit & { type: string }> = [];
+  let isShortener = false;
+  let resolvedIp: string | null = null;
+  const degraded = [...resolved.degraded];
+
+  let hostname: string | null = null;
+  try {
+    hostname = new URL(resolved.finalUrl).hostname;
+  } catch {
+    /* unparseable — resolved.finalUrl already carries the error context */
+  }
+
+  if (hostname && env.FEEDS_DB && env.VERDICT_CACHE) {
+    const db = env.FEEDS_DB;
+    const kv = env.VERDICT_CACHE;
+
+    // If the host is already a literal IP, there's nothing to resolve — skip the
+    // pointless DoH call and check that IP directly (real bug found+fixed via
+    // production probe: a live URLhaus IP-literal URL silently skipped the
+    // TIF-IPs check because resolveIp() found "no A record" for an IP it was
+    // never meant to resolve — see CLAUDE.md).
+    const hostIsIpLiteral = isIpLiteral(hostname);
+
+    const [exactUrlHit, shortenerHit, tldHit, tifDomainHit, dns] = await Promise.all([
+      lookupExactUrl(db, resolved.finalUrl),
+      lookupDomain(db, hostname),
+      lookupTld(db, hostname),
+      lookupDomainInBlob(kv, "feed:tif-domains", hostname, "HaGeZi-TIF-domains"),
+      hostIsIpLiteral ? Promise.resolve({ ip: hostname.replace(/^\[|\]$/g, "") }) : resolveIp(hostname),
+    ]);
+
+    if (exactUrlHit) feedSignals.push({ ...exactUrlHit, type: "urlhaus_exact_url" });
+    if (tldHit) feedSignals.push({ ...tldHit, type: "abused_tld" });
+    if (tifDomainHit) feedSignals.push({ ...tifDomainHit, type: "threat_intel_domain" });
+    isShortener = !!shortenerHit;
+
+    if ("degraded" in dns && dns.degraded) degraded.push(dns.degraded);
+    resolvedIp = dns.ip;
+    if (dns.ip) {
+      const ipHit = await lookupInBlob(kv, "feed:tif-ips", dns.ip, "HaGeZi-TIF-ips");
+      if (ipHit) feedSignals.push({ ...ipHit, type: "threat_intel_ip" });
+    }
+  } else if (hostname) {
+    degraded.push("feed lookups skipped: D1/KV bindings not configured");
+  }
+
   return {
     ...resolved,
+    degraded,
     cleanedUrl: cleaned.cleanedUrl,
     removedParams: cleaned.removedParams,
     queryParams: cleaned.queryParams,
     heuristics,
+    feedSignals,
+    isShortener,
+    resolvedIp,
   };
 }
 
-function createServer(): McpServer {
+function createServer(env: Env): McpServer {
   const server = new McpServer({ name: "linkcheck-mcp", version: "0.1.0" });
 
   server.registerTool(
     "check_url",
     {
       description:
-        "Resolve a URL's true destination by safely following redirects (HEAD-first, no page render) and return the redirect chain. Call this before opening, following, or recommending any link from an untrusted source.",
+        "Resolve a URL's true destination by safely following redirects (HEAD-first, no page render), check it against threat-intelligence feeds, and return the redirect chain plus every signal found. Call this before opening, following, or recommending any link from an untrusted source.",
       inputSchema: { url: z.string().describe("The http(s) URL to inspect") },
     },
     async ({ url }: { url: string }) => {
       try {
-        const result = await checkOneUrl(url);
+        const result = await checkOneUrl(url, env);
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (e) {
         return {
@@ -64,7 +130,7 @@ function createServer(): McpServer {
       const checked = await Promise.all(
         extracted.urls.map(async (url) => {
           try {
-            return { url, ...(await checkOneUrl(url)) };
+            return { url, ...(await checkOneUrl(url, env)) };
           } catch (e) {
             return { url, error: (e as Error).message };
           }
@@ -82,10 +148,6 @@ function createServer(): McpServer {
   return server;
 }
 
-// One handler at module scope (SPEC §5 note; safe for stateless tool calls).
-// Exported so it can be exercised directly in Node (workerd/wrangler dev is
-// unavailable on macOS < 13.5 — see CLAUDE.md gotchas).
-export const handler = createMcpHandler(createServer);
 export { createServer };
 
 export default {
@@ -93,7 +155,20 @@ export default {
     const { pathname } = new URL(request.url);
 
     if (pathname === "/health") {
-      return Response.json({ status: "ok", service: "linkcheck-mcp", version: "0.1.0" });
+      let feeds: unknown = "unavailable (D1 not bound)";
+      if (env.FEEDS_DB) {
+        try {
+          const { results } = await env.FEEDS_DB.prepare(
+            "SELECT source, last_refresh, last_status, entry_count FROM feed_meta",
+          )
+            .bind()
+            .all();
+          feeds = results;
+        } catch (e) {
+          feeds = `error reading feed_meta: ${(e as Error).message}`;
+        }
+      }
+      return Response.json({ status: "ok", service: "linkcheck-mcp", version: "0.1.0", feeds });
     }
 
     // Bearer gate BEFORE the MCP handler — createMcpHandler does not verify tokens (SPEC §11).
@@ -102,6 +177,9 @@ export default {
       return new Response("unauthorized", { status: 401 });
     }
 
-    return handler(request, env, ctx);
+    // Built fresh per request so tool handlers can close over this request's env
+    // (bindings aren't available via the McpServer factory's own context) — fine
+    // per SPEC/docs since we don't use notify()/list-changed events.
+    return createMcpHandler(() => createServer(env))(request, env, ctx);
   },
 };
