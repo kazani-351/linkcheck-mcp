@@ -46,10 +46,12 @@ npm run typecheck # tsc --noEmit
    npx wrangler kv namespace create linkcheck-mcp-cache
    ```
 2. Apply the schema and seed the feeds (see `migrations/*.sql` for schema; feed data is fetched fresh from HaGeZi/URLhaus/ClearURLs upstream sources — see Sources below — and loaded via `wrangler d1 execute --remote --file=...` for the small feeds and `wrangler kv key put --path=... --remote` for the large ones as single blobs).
-3. Set the bearer token that gates the MCP endpoint:
+3. **Auth (optional):** the Worker supports a bearer-token gate (`if (token && ...)` in `src/index.ts` — set once, it's enforced; unset, it no-ops):
    ```bash
    npx wrangler secret put MCP_BEARER_TOKEN
    ```
+   The reference deployment currently runs **without** this set — Claude's native "Add custom connector" UI only supports OAuth or `static_headers` (beta, not yet exposed there) for remote MCP servers, not a plain bearer header, so connecting via that UI meant dropping the gate rather than standing up a full OAuth server (see SPEC §11 for the reasoning and the reversal path). If you connect via `mcp-remote` (below) instead, you can keep the token.
+
    Optional: `npx wrangler secret put VIRUSTOTAL_API_KEY` for VT-augmented checks (degrades cleanly if unset).
 4. Deploy:
    ```bash
@@ -60,12 +62,15 @@ npm run typecheck # tsc --noEmit
    curl https://<your-worker>.workers.dev/health
    curl -X POST https://<your-worker>.workers.dev/mcp \
      -H "content-type: application/json" -H "accept: application/json, text/event-stream" \
-     -H "authorization: Bearer <token>" \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"check_url","arguments":{"url":"https://example.com"}}}'
    ```
+   (Add `-H "authorization: Bearer <token>"` if you set `MCP_BEARER_TOKEN`.)
 
 ### Connect a client
-Add to Claude Desktop / Claude Code via [`mcp-remote`](https://www.npmjs.com/package/mcp-remote):
+
+**Claude Desktop / Cowork (native connector, no CLI):** Settings → Connectors → Add custom connector → paste the server URL (`https://<your-worker>.workers.dev/mcp`), leave OAuth fields blank if running authless. This is the path used for the reference deployment.
+
+**Any MCP client, with a bearer token preserved:** via [`mcp-remote`](https://www.npmjs.com/package/mcp-remote):
 ```json
 {
   "mcpServers": {
@@ -76,7 +81,8 @@ Add to Claude Desktop / Claude Code via [`mcp-remote`](https://www.npmjs.com/pac
   }
 }
 ```
-See `skills/check-url-safety.md` for a companion Skill that teaches Claude to call these tools proactively on untrusted links, rather than waiting to be asked.
+
+Either way, install `skills/check-url-safety.md` to `~/.claude/skills/check-url-safety/SKILL.md` — it teaches Claude to call these tools proactively on untrusted links, rather than waiting to be asked. (Do this *after* connecting — the skill references tools that don't exist until the connector is live.)
 
 ## Sources & attribution
 - Threat intel: [HaGeZi dns-blocklists](https://github.com/hagezi/dns-blocklists) (TIF, Entropy-NRD/DGA, Abused-TLDs, TIF-IPs, URL-Shortener), [URLhaus](https://urlhaus.abuse.ch/) (abuse.ch).
