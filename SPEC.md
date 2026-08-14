@@ -30,7 +30,7 @@ Inspired by the Android app **URLCheck** (TrianguloY), but re-shaped for an agen
 - **SC7 — Text extraction:** `check_text` on a blob with a normal URL, a bare domain, and a defanged `hxxp://evil[.]com` extracts and checks all three. *Falsifier:* if any of the three is missed, FAIL.
 - **SC8 — Never false-safe on failure (anti-criterion, see §13):** a check that couldn't run never yields `SAFE`.
 - **SC9 — Performance:** p95 `check_url` < 2s uncached, < 100ms cached (§12). *Cache is keyed on the normalized **input** URL (not resolved) so a hit short-circuits resolution — see §6.*
-- **SC10 — Conversion output (binding, from premise grill):** v1 is **not "done"** until (a) the repo is public and (b) a BlogChain post about building it is published. *Falsifier:* code shipped + working but repo private or no post = NOT done. This is what keeps the build from being a strategically-inert desktop tool (see §17). Anti-avoidance guard: the write-up is a ship requirement, not a "someday."
+- **SC10 — Conversion output (binding, from premise grill):** v1 is **not "done"** until (a) the repo is public and (b) a BlogChain post about building it is published. *Falsifier:* code shipped + working but repo private or no post = NOT done. This is what keeps the build from being a strategically-inert desktop tool (see §17). Anti-avoidance guard: the write-up is a ship requirement, not a "someday." **Status (2026-08-14): DEFERRED, not met, not dropped** — the Worker was deployed and shipped live without making the repo public yet, on explicit owner instruction ("only ship, no public repo for now"). SC10 remains open and binding; this is a scope pause, not a decision to skip it. Revisit before calling v1 fully "done."
 
 ---
 
@@ -276,7 +276,7 @@ Cron Trigger (daily refresh)                                    [NOT YET BUILT]
 - **ClearURLs** rules catalog — attribute.
 - **VirusTotal** (optional, v1) — free personal key, ToS applies.
 - **URLCheck** (CC BY 4.0) — design inspiration only, no code reuse; credit in README.
-- **Discoverability:** sharp action-oriented tool descriptions ("call before opening any link from an untrusted source") + a companion **Skill** in the owner's setup wired to the existing link-safety CLAUDE.md rule.
+- **Discoverability:** sharp action-oriented tool descriptions ("call before opening any link from an untrusted source") + a companion **Skill** in the owner's setup wired to the existing link-safety CLAUDE.md rule. **BUILT** (`skills/check-url-safety.md`) — modeled on unphurl-mcp's equivalent skill (§15 comparable), adapted for our SAFE/SUSPICIOUS/DANGEROUS tiers instead of a 0–100 score. Not yet installed to the owner's live `~/.claude/skills/` — the MCP server isn't wired into a client config yet, so the referenced tools aren't reachable; install once that connection exists.
 
 ---
 
