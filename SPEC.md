@@ -98,7 +98,8 @@ Cloudflare Worker  ── createMcpHandler(() => createServer(env)), built fresh
    ├─ feeds.ts: D1 lookups (exact-URL, shortener, abused-TLD) +
    │            KV-blob lookups (TIF-domains, TIF-IPs, Entropy-NRD),
    │            in-memory Set cached at module scope per blob
-   ├─ scorer: tiered rules → verdict + evidence          [NOT YET BUILT — next slice]
+   ├─ scorer.ts: tiered rules → verdict + evidence (SPEC §8) — BUILT + deployed,
+   │             verified against the full live golden set (§12)
    └─ (optional) VirusTotal client (degradeable)          [NOT YET BUILT]
    ▲
    │  bindings
@@ -190,13 +191,15 @@ Cron Trigger (daily refresh)                                    [NOT YET BUILT]
 
 ---
 
-## 8. Scoring (tiered rules — transparent, no magic numbers)
+## 8. Scoring (tiered rules — transparent, no magic numbers) — BUILT, `src/scorer.ts`
 
 - **DANGEROUS:** URLhaus **exact-URL** hit / HaGeZi-TIF (domain or IP) / VirusTotal-malicious / `javascript:`|`data:` scheme / embedded-credentials `@`-authority.
 - **SUSPICIOUS:** URLhaus **domain-only** hit (compromised-host nuance) / homograph (mixed-script/confusable) / abused-TLD / Entropy-NRD/DGA / IP-literal host / deceptive-subdomain / cross-domain hops / insecure `http://` / shortener-with-unresolvable-target / VirusTotal-suspicious.
-- **SAFE:** none of the above **and** all checks ran.
-- **Combination:** worst tier wins; multiple SUSPICIOUS signals stay SUSPICIOUS (not auto-escalated) but all are listed.
+- **SAFE:** none of the above **and** all checks ran (AC1, §13: a degraded check can only push toward SUSPICIOUS, enforced in `computeVerdict`, never silently SAFE).
+- **Combination:** worst tier wins; multiple SUSPICIOUS signals stay SUSPICIOUS (not auto-escalated) but all are listed in `verdictReason`, joined by `; `.
 - *Rejected:* weighted-score thresholds (magic numbers, hard to explain) and strictest-signal-only (can't express corroboration in evidence).
+- **`compact: true`** on `check_url`/`check_text` trims the DTO to `{verdict, verdictReason, resolvedUrl, degraded}` (§7 design, implemented this slice). `check_text` additionally returns `worstVerdict` (max severity across all checked URLs).
+- **Verified against the full live golden set (§12) on production**, not just unit tests: clean domain → SAFE, real active URLhaus malware URL → DANGEROUS, embedded-credentials → DANGEROUS, IP-literal → SUSPICIOUS, homograph → SUSPICIOUS, abused-TLD → SUSPICIOUS. All 7 pass on `https://linkcheck-mcp.kazani.workers.dev`.
 
 ---
 
@@ -353,4 +356,9 @@ Plus one scope-*reducing* correction: the **SSRF guard was over-built for the Wo
 13. **Module-scope blob cache leaked between tests** — `blobSetCache` is keyed only by blob-key string, correct for production (one KV binding per isolate) but wrong for tests using different fake KV instances under the same key name. An earlier test's empty-KV fake poisoned the cache for a later test expecting real data. `_resetBlobCacheForTests()` existed for this exact reason and was simply forgotten on a new test — added it, and to the other KV-touching tests for order-independence.
 14. **A bad test IP (`203.0.113.5`, RFC 5737 TEST-NET-3) caused a real 10-second hang** — unroutable but outside the SSRF guard's blocked ranges, so `resolveUrl` actually attempted a live fetch and waited out the timeout. Switched to a link-local address the guard short-circuits instantly — the lesson: a "safe-sounding" test IP still needs to be one your own code actually recognizes as unsafe, or it just hits the network.
 15. **Cloudflare deploy/secret propagation is not instant** — a curl immediately after `wrangler deploy` returned a transient 404; a curl immediately after `wrangler secret put` transiently bypassed the just-set auth gate (hit a stale edge node still running the pre-secret Worker version). Both resolved within seconds on retry. Real risk: trusting a single post-mutation security check as final. Now a standing CLAUDE.md gotcha — retry 3-5x before concluding a post-deploy auth check failed or passed.
+
+### Slice 7 (scoring) — bugs and real findings
+
+16. **Cross-domain-hop detection false-flagged the single most common redirect pattern on the web** — exact-hostname comparison meant `anthropic.com → www.anthropic.com` (apex↔www canonicalization) counted as "jumping domains," pushing a completely clean, top-tier site to SUSPICIOUS. Found via the live golden-set run against production (`SC5` failed), not a unit test — the original test suite had encoded the *same wrong assumption* the code did ("subdomain change should count as suspicious"), so nothing caught it until real-world data did. Fixed by comparing a crude registrable-domain proxy (last-2-labels, same no-PSL precedent as `feeds.ts`) instead of the full hostname — `bit.ly → evil.ru` still flags correctly, `login.x.com → account.x.com` and apex↔www no longer do. Regression-checked against a second real site (`github.com`) before considering it closed, not just the one example that broke.
+17. **A shell test-harness bug masqueraded as 7 simultaneous product failures** — `sed`/`echo` mangled the SSE response body identically across every golden-set case, producing a JSON parse error at the same byte offset regardless of which URL was checked. The tell that it was harness, not product: identical failure mode across *unrelated* requests. Resolved by parsing the raw response directly (Python `subprocess` + `json.loads`, no intermediate shell text processing) rather than trusting a shell pipeline with an SSE/JSON payload. Lesson banked: when N unrelated checks fail identically, suspect the test rig before the code under test.
 ```

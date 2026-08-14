@@ -2,7 +2,7 @@
 // Run: `node --test src/resolver.test.ts`
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assertHttpUrl, isPrivateHost } from "./resolver.ts";
+import { assertHttpUrl, isPrivateHost, hasCrossDomainHop } from "./resolver.ts";
 
 test("assertHttpUrl accepts http and https", () => {
   assert.equal(assertHttpUrl("https://example.com").protocol, "https:");
@@ -25,4 +25,24 @@ test("isPrivateHost allows public hosts", () => {
   for (const h of ["8.8.8.8", "1.1.1.1", "github.com", "example.com", "172.32.0.1", "172.15.0.1"]) {
     assert.equal(isPrivateHost(h), false, `${h} should be public`);
   }
+});
+
+test("hasCrossDomainHop: true when the chain jumps domains mid-flight", () => {
+  assert.equal(hasCrossDomainHop(["https://bit.ly/x", "https://evil.ru/phish"]), true);
+});
+
+test("hasCrossDomainHop: false for same-domain redirects (e.g. http->https on one site)", () => {
+  assert.equal(hasCrossDomainHop(["http://example.com/", "https://example.com/"]), false);
+});
+
+test("hasCrossDomainHop: false for apex<->www (real prod false-positive, SPEC §20 bug #16)", () => {
+  assert.equal(hasCrossDomainHop(["https://anthropic.com/", "https://www.anthropic.com/"]), false);
+});
+
+test("hasCrossDomainHop: false for same-registrable-domain subdomain moves (login.x.com -> account.x.com)", () => {
+  assert.equal(hasCrossDomainHop(["https://login.example.com/", "https://account.example.com/"]), false);
+});
+
+test("hasCrossDomainHop: single-URL chain (no redirect) is never a cross-domain hop", () => {
+  assert.equal(hasCrossDomainHop(["https://example.com/"]), false);
 });

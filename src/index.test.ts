@@ -140,6 +140,29 @@ test("check_url wires feed hits (exact-URL, shortener-domain) and resolvedIp int
   assert.equal(payload.isShortener, true);
   assert.ok(payload.feedSignals.some((s: { type: string }) => s.type === "urlhaus_exact_url"));
   assert.match(payload.resolvedIp, /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/);
+  assert.equal(payload.verdict, "DANGEROUS", "a URLhaus exact-URL hit must produce a DANGEROUS verdict end-to-end");
+  assert.match(payload.verdictReason, /URLhaus/);
+});
+
+test("check_url compact mode returns only verdict/reason/resolvedUrl/degraded", async () => {
+  _resetBlobCacheForTests();
+  const res = await worker.fetch(
+    mcpReq(
+      {
+        jsonrpc: "2.0",
+        id: 13,
+        method: "tools/call",
+        params: { name: "check_url", arguments: { url: "https://example.com/", compact: true } },
+      },
+      "test-secret",
+    ),
+    fakeEnv(),
+    ctx,
+  );
+  const rpcResult = JSON.parse((await res.text()).split("data: ")[1]);
+  const payload = JSON.parse(rpcResult.result.content[0].text);
+  assert.deepEqual(Object.keys(payload).sort(), ["degraded", "resolvedUrl", "verdict", "verdictReason"]);
+  assert.equal(payload.verdict, "DANGEROUS");
 });
 
 test("check_url skips DoH and checks the feed directly for an IP-literal host", async () => {

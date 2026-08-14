@@ -24,6 +24,36 @@ export interface ResolveResult {
   hops: Hop[];
   stoppedReason: StoppedReason;
   degraded: string[];
+  crossDomainHops: boolean;
+}
+
+/** Crude registrable-domain proxy: last two labels, no public-suffix-list
+ *  dependency (same "no PSL in v1" precedent as feeds.ts's parent-label match —
+ *  a rare over-broad case on a two-label TLD like "co.uk" is a missed edge case,
+ *  not a false-safe). */
+function registrableGuess(hostname: string): string {
+  const labels = hostname.toLowerCase().split(".");
+  return labels.slice(-2).join(".");
+}
+
+/** True if any consecutive pair of URLs in the chain changes REGISTRABLE domain —
+ *  e.g. a shortener handing off to an entirely different organization's domain
+ *  (bit.ly -> evil.ru). Deliberately NOT exact-hostname comparison: apex<->www
+ *  (anthropic.com -> www.anthropic.com) and same-domain subdomain moves
+ *  (login.x.com -> account.x.com) are both extremely common, benign redirect
+ *  patterns — flagging them was a real false-positive found via production
+ *  testing against a live top-tier site (SPEC §20 bug #16), not a hypothetical. */
+export function hasCrossDomainHop(chain: string[]): boolean {
+  for (let i = 1; i < chain.length; i++) {
+    try {
+      const prev = registrableGuess(new URL(chain[i - 1]).hostname);
+      const cur = registrableGuess(new URL(chain[i]).hostname);
+      if (prev !== cur) return true;
+    } catch {
+      /* unparseable chain entry — skip this pair, not fatal to the check */
+    }
+  }
+  return false;
 }
 
 const MAX_HOPS = 10;
@@ -148,12 +178,18 @@ export async function resolveUrl(inputUrl: string): Promise<ResolveResult> {
     if (i === MAX_HOPS - 1) stoppedReason = "max_hops";
   }
 
+  const chain = hops
+    .map((h) => h.url)
+    .concat(stoppedReason === "ok" ? [current] : [])
+    .filter((v, idx, arr) => arr.indexOf(v) === idx);
+
   return {
     inputUrl,
     finalUrl: current,
-    chain: hops.map((h) => h.url).concat(stoppedReason === "ok" ? [current] : []).filter((v, idx, arr) => arr.indexOf(v) === idx),
+    chain,
     hops,
     stoppedReason,
     degraded,
+    crossDomainHops: hasCrossDomainHop(chain),
   };
 }

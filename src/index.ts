@@ -17,6 +17,7 @@ import {
   type MinimalD1,
   type MinimalKV,
 } from "./feeds.ts";
+import { computeVerdict } from "./scorer.ts";
 
 // Typed against the minimal interfaces feeds.ts actually uses (prepare/bind/all,
 // get) rather than the full D1Database/KVNamespace surface — a real Cloudflare
@@ -59,17 +60,19 @@ async function checkOneUrl(url: string, env: Env) {
     // never meant to resolve — see CLAUDE.md).
     const hostIsIpLiteral = isIpLiteral(hostname);
 
-    const [exactUrlHit, shortenerHit, tldHit, tifDomainHit, dns] = await Promise.all([
+    const [exactUrlHit, shortenerHit, tldHit, tifDomainHit, nrdHit, dns] = await Promise.all([
       lookupExactUrl(db, resolved.finalUrl),
       lookupDomain(db, hostname),
       lookupTld(db, hostname),
       lookupDomainInBlob(kv, "feed:tif-domains", hostname, "HaGeZi-TIF-domains"),
+      lookupDomainInBlob(kv, "feed:entropy-nrd", hostname, "HaGeZi-Entropy-NRD"),
       hostIsIpLiteral ? Promise.resolve({ ip: hostname.replace(/^\[|\]$/g, "") }) : resolveIp(hostname),
     ]);
 
     if (exactUrlHit) feedSignals.push({ ...exactUrlHit, type: "urlhaus_exact_url" });
     if (tldHit) feedSignals.push({ ...tldHit, type: "abused_tld" });
     if (tifDomainHit) feedSignals.push({ ...tifDomainHit, type: "threat_intel_domain" });
+    if (nrdHit) feedSignals.push({ ...nrdHit, type: "entropy_nrd" });
     isShortener = !!shortenerHit;
 
     if ("degraded" in dns && dns.degraded) degraded.push(dns.degraded);
@@ -82,7 +85,18 @@ async function checkOneUrl(url: string, env: Env) {
     degraded.push("feed lookups skipped: D1/KV bindings not configured");
   }
 
+  const { verdict, verdictReason } = computeVerdict({
+    heuristics,
+    feedSignals,
+    isShortener,
+    stoppedReason: resolved.stoppedReason,
+    degraded,
+    crossDomainHops: resolved.crossDomainHops,
+  });
+
   return {
+    verdict,
+    verdictReason,
     ...resolved,
     degraded,
     cleanedUrl: cleaned.cleanedUrl,
@@ -95,6 +109,19 @@ async function checkOneUrl(url: string, env: Env) {
   };
 }
 
+interface FullResult extends Awaited<ReturnType<typeof checkOneUrl>> {}
+
+/** SPEC §7: compact:true trims the DTO to verdict + verdict_reason + resolved_url
+ *  + degraded — for callers that don't need the full evidence trail. */
+function toCompact(r: FullResult) {
+  return {
+    verdict: r.verdict,
+    verdictReason: r.verdictReason,
+    resolvedUrl: r.finalUrl,
+    degraded: r.degraded,
+  };
+}
+
 function createServer(env: Env): McpServer {
   const server = new McpServer({ name: "linkcheck-mcp", version: "0.1.0" });
 
@@ -102,13 +129,17 @@ function createServer(env: Env): McpServer {
     "check_url",
     {
       description:
-        "Resolve a URL's true destination by safely following redirects (HEAD-first, no page render), check it against threat-intelligence feeds, and return the redirect chain plus every signal found. Call this before opening, following, or recommending any link from an untrusted source.",
-      inputSchema: { url: z.string().describe("The http(s) URL to inspect") },
+        "Resolve a URL's true destination by safely following redirects (HEAD-first, no page render), check it against threat-intelligence feeds, and return a SAFE/SUSPICIOUS/DANGEROUS verdict with the evidence behind it. Call this before opening, following, or recommending any link from an untrusted source.",
+      inputSchema: {
+        url: z.string().describe("The http(s) URL to inspect"),
+        compact: z.boolean().optional().describe("Return only verdict/reason/resolvedUrl/degraded instead of the full evidence trail"),
+      },
     },
-    async ({ url }: { url: string }) => {
+    async ({ url, compact }: { url: string; compact?: boolean }) => {
       try {
         const result = await checkOneUrl(url, env);
-        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        const payload = compact ? toCompact(result) : result;
+        return { content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }] };
       } catch (e) {
         return {
           content: [{ type: "text" as const, text: `Error: ${(e as Error).message}` }],
@@ -122,22 +153,32 @@ function createServer(env: Env): McpServer {
     "check_text",
     {
       description:
-        "Extract every URL from a block of text (standard links, bare domains, and defanged forms like hxxp://evil[.]com) and check each one. Call this on a pasted email, message, or document before trusting any link inside it.",
-      inputSchema: { text: z.string().describe("Free text that may contain one or more URLs") },
+        "Extract every URL from a block of text (standard links, bare domains, and defanged forms like hxxp://evil[.]com) and check each one, returning a verdict for each. Call this on a pasted email, message, or document before trusting any link inside it.",
+      inputSchema: {
+        text: z.string().describe("Free text that may contain one or more URLs"),
+        compact: z.boolean().optional().describe("Return only verdict/reason/resolvedUrl/degraded per URL instead of the full evidence trail"),
+      },
     },
-    async ({ text }: { text: string }) => {
+    async ({ text, compact }: { text: string; compact?: boolean }) => {
       const extracted = extractUrls(text);
       const checked = await Promise.all(
         extracted.urls.map(async (url) => {
           try {
-            return { url, ...(await checkOneUrl(url, env)) };
+            const result = await checkOneUrl(url, env);
+            return { url, ...(compact ? toCompact(result) : result) };
           } catch (e) {
             return { url, error: (e as Error).message };
           }
         }),
       );
+      const worstVerdict = checked.reduce<string>((worst, c) => {
+        const order = { SAFE: 0, SUSPICIOUS: 1, DANGEROUS: 2 } as const;
+        const v = "verdict" in c ? (c.verdict as keyof typeof order) : undefined;
+        return v && order[v] > (order[worst as keyof typeof order] ?? -1) ? v : worst;
+      }, "SAFE");
       const result = {
         checked,
+        worstVerdict,
         truncated: extracted.truncated,
         droppedCount: extracted.droppedCount,
       };
