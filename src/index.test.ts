@@ -250,6 +250,45 @@ test("check_url degrades loud (not crash) when D1/KV bindings are absent", async
   assert.ok(payload.degraded.some((d: string) => d.includes("bindings not configured")));
 });
 
+// --- POST /check (plain-HTTP verdict endpoint for the local UserPromptSubmit hook) ---
+// Link-local URL short-circuits the resolver's SSRF guard before any network
+// fetch, and ENV has no VT key, so these run instant + fully offline.
+function checkReq(body: unknown, auth?: string): Request {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (auth) headers.authorization = `Bearer ${auth}`;
+  return new Request("http://localhost/check", { method: "POST", headers, body: typeof body === "string" ? body : JSON.stringify(body) });
+}
+
+test("POST /check returns a full verdict for a URL", async () => {
+  const res = await worker.fetch(checkReq({ url: "http://169.254.169.254/x" }, "test-secret"), ENV, ctx);
+  assert.equal(res.status, 200);
+  const payload = await res.json() as { verdict: string };
+  assert.ok(["SAFE", "SUSPICIOUS", "DANGEROUS"].includes(payload.verdict));
+  assert.ok("feedSignals" in payload, "non-compact response carries the full evidence trail");
+});
+
+test("POST /check with compact:true trims to verdict/verdictReason/resolvedUrl/degraded", async () => {
+  const res = await worker.fetch(checkReq({ url: "http://169.254.169.254/x", compact: true }, "test-secret"), ENV, ctx);
+  assert.equal(res.status, 200);
+  const payload = await res.json() as Record<string, unknown>;
+  assert.deepEqual(Object.keys(payload).sort(), ["degraded", "resolvedUrl", "verdict", "verdictReason"]);
+});
+
+test("POST /check without auth -> 401 (shares the MCP bearer gate)", async () => {
+  const res = await worker.fetch(checkReq({ url: "http://169.254.169.254/x" }), ENV, ctx);
+  assert.equal(res.status, 401);
+});
+
+test("POST /check with missing url -> 400", async () => {
+  const res = await worker.fetch(checkReq({ compact: true }, "test-secret"), ENV, ctx);
+  assert.equal(res.status, 400);
+});
+
+test("POST /check with invalid JSON -> 400", async () => {
+  const res = await worker.fetch(checkReq("{not json", "test-secret"), ENV, ctx);
+  assert.equal(res.status, 400);
+});
+
 test("tools/list includes check_text", async () => {
   const res = await worker.fetch(mcpReq({ jsonrpc: "2.0", id: 4, method: "tools/list" }, "test-secret"), ENV, ctx);
   assert.match(await res.text(), /"name":"check_text"/);

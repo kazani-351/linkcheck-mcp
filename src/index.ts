@@ -256,6 +256,30 @@ export default {
       return new Response("unauthorized", { status: 401 });
     }
 
+    // Plain-HTTP verdict endpoint — lets a non-MCP client (the local
+    // UserPromptSubmit hook in ~/.claude/hooks) get a verdict with a single
+    // curl, reusing the EXACT same checkOneUrl path as the MCP check_url tool.
+    // Sits behind the same bearer gate as everything below. POST body:
+    // { "url": string, "compact"?: boolean }. compact:true returns just
+    // verdict/verdictReason/resolvedUrl/degraded (all the hook needs).
+    if (pathname === "/check" && request.method === "POST") {
+      let body: { url?: unknown; compact?: unknown };
+      try {
+        body = await request.json();
+      } catch {
+        return Response.json({ error: "invalid JSON body" }, { status: 400 });
+      }
+      if (typeof body.url !== "string" || body.url === "") {
+        return Response.json({ error: "missing 'url' string in body" }, { status: 400 });
+      }
+      try {
+        const result = await checkOneUrl(body.url, env);
+        return Response.json(body.compact === true ? toCompact(result) : result);
+      } catch (e) {
+        return Response.json({ error: (e as Error).message }, { status: 500 });
+      }
+    }
+
     // Manual refresh trigger — exists because local wrangler dev can't fire a
     // real cron tick on this machine (workerd requires macOS 13.5+), so this is
     // also how the refresh logic gets verified against production. Doubles as a
