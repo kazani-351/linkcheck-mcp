@@ -94,6 +94,39 @@ function mcpReq(body: unknown, auth?: string): Request {
   return new Request("http://localhost/mcp", { method: "POST", headers, body: JSON.stringify(body) });
 }
 
+// --- landing page + server-card (public discovery, no auth) ---
+test("GET / with Accept: text/html serves the landing page", async () => {
+  const res = await worker.fetch(
+    new Request("http://localhost/", { headers: { accept: "text/html" } }),
+    ENV,
+    ctx,
+  );
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") ?? "", /text\/html/);
+  assert.match(res.headers.get("link") ?? "", /server-card\.json/);
+  assert.match(await res.text(), /linkcheck/);
+});
+
+test("GET / without text/html does NOT shadow the MCP transport", async () => {
+  const res = await worker.fetch(
+    new Request("http://localhost/", { headers: { accept: "text/event-stream" } }),
+    ENV,
+    ctx,
+  );
+  // Whatever the MCP handler answers, it must not be the HTML landing page.
+  assert.doesNotMatch(res.headers.get("content-type") ?? "", /text\/html/);
+});
+
+test("/.well-known/mcp/server-card.json returns the card, no auth", async () => {
+  const res = await worker.fetch(new Request("http://localhost/.well-known/mcp/server-card.json"), ENV, ctx);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") ?? "", /application\/json/);
+  const card = await res.json() as { name: string; tools: unknown[]; authentication: { type: string } };
+  assert.equal(card.name, "linkcheck-mcp");
+  assert.equal(card.tools.length, 2);
+  assert.equal(card.authentication.type, "none");
+});
+
 test("/health returns ok without auth", async () => {
   const res = await worker.fetch(new Request("http://localhost/health"), ENV, ctx);
   assert.equal(res.status, 200);

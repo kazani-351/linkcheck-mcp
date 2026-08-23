@@ -20,6 +20,7 @@ import {
 import { computeVerdict, type Verdict } from "./scorer.ts";
 import { checkVirusTotal } from "./virustotal.ts";
 import { refreshAllFeeds } from "./refresh.ts";
+import { LANDING_HTML, SERVER_CARD_JSON, LINK_HEADER } from "./landing.ts";
 
 // Typed against the minimal (but write-capable, for the cron refresh path)
 // interfaces feeds.ts/refresh.ts actually use, rather than the full
@@ -244,8 +245,31 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const { pathname } = new URL(request.url);
 
+    // Human landing page — served only for browser (text/html) GETs on "/", so
+    // it never shadows the MCP transport, which POSTs (and negotiates SSE via
+    // `accept: text/event-stream`) on this same origin. Public, like /health.
+    if (
+      request.method === "GET" &&
+      pathname === "/" &&
+      (request.headers.get("accept") ?? "").includes("text/html")
+    ) {
+      return new Response(LANDING_HTML, {
+        headers: { "content-type": "text/html; charset=utf-8", link: LINK_HEADER },
+      });
+    }
+
+    // Machine-readable server card for MCP discovery. Public.
+    if (pathname === "/.well-known/mcp/server-card.json") {
+      return new Response(SERVER_CARD_JSON, {
+        headers: { "content-type": "application/json; charset=utf-8" },
+      });
+    }
+
     if (pathname === "/health") {
-      return Response.json({ status: "ok", service: "linkcheck-mcp", version: "0.1.0", feeds: await readFeedMeta(env) });
+      return Response.json(
+        { status: "ok", service: "linkcheck-mcp", version: "0.1.0", feeds: await readFeedMeta(env) },
+        { headers: { link: LINK_HEADER } },
+      );
     }
 
     // Bearer gate BEFORE any protected route — createMcpHandler does not verify

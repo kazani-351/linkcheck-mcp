@@ -11,9 +11,19 @@ tiered verdict (`SAFE` / `SUSPICIOUS` / `DANGEROUS`) plus the evidence behind it
 Inspired by the Android app [URLCheck](https://github.com/TrianguloY/URLCheck), re-shaped
 for an AI agent instead of a human tap.
 
+The live reference deployment has a browsable homepage at
+[linkcheck-mcp.kazani.workers.dev](https://linkcheck-mcp.kazani.workers.dev/).
+
 ## Tools (v1)
 - `check_url(url, compact?)` — resolve + clean + heuristics + threat-feed verdict with evidence. `compact: true` returns just `{verdict, verdictReason, resolvedUrl, degraded}`.
 - `check_text(text, compact?)` — extract every URL in a blob (standard, bare, and defanged forms like `hxxp://evil[.]com`), check each, and return a `worstVerdict` summary.
+
+## Endpoints
+- `GET /` — human landing page (served for `text/html` requests; never shadows the MCP transport on the same origin).
+- `GET /health` — per-feed `last_status` / `last_refresh`.
+- `GET /.well-known/mcp/server-card.json` — machine-readable server descriptor for MCP discovery.
+- `POST /mcp` — the MCP transport.
+- `POST /check` — plain-HTTP verdict (`{url, compact?}`) for non-MCP clients, e.g. a shell pre-flight hook that checks links before an agent acts on them. Same logic and bearer gate as `check_url`.
 
 ## Stack
 Cloudflare Worker · stateless `createMcpHandler` (MCP SDK v2) · D1 (small feeds) + KV (large feeds + verdict cache) · daily Cron Trigger for feed refresh.
