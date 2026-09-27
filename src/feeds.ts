@@ -126,15 +126,24 @@ export interface WritableKV extends MinimalKV {
 // could stay invisible to a given isolate indefinitely. 15 min bounds the
 // worst-case staleness to well under the daily refresh cadence itself.
 const BLOB_CACHE_TTL_MS = 15 * 60 * 1000;
-const blobSetCache = new Map<string, { set: Set<string>; loadedAt: number }>();
+// Caches the in-flight PROMISE, not the finished Set: concurrent lookups on a
+// cold isolate (check_text/check_skill check several URLs in parallel) must
+// share one KV read + parse. Caching only the result let every caller miss and
+// parse a 100K–580K-line blob itself — 5 URLs × 3 blobs blew the Worker CPU
+// limit in production (exceededCpu, 2026-09-27). A failed load is evicted so
+// the next lookup retries instead of replaying the error for 15 minutes.
+const blobSetCache = new Map<string, { set: Promise<Set<string>>; loadedAt: number }>();
 
-async function loadBlobSet(kv: MinimalKV, key: string): Promise<Set<string>> {
+function loadBlobSet(kv: MinimalKV, key: string): Promise<Set<string>> {
   const cached = blobSetCache.get(key);
   if (cached && Date.now() - cached.loadedAt < BLOB_CACHE_TTL_MS) return cached.set;
 
-  const raw = await kv.get(key);
-  const set = new Set(raw ? raw.split("\n").filter(Boolean) : []);
-  blobSetCache.set(key, { set, loadedAt: Date.now() });
+  const set = kv.get(key).then((raw) => new Set(raw ? raw.split("\n").filter(Boolean) : []));
+  const entry = { set, loadedAt: Date.now() };
+  blobSetCache.set(key, entry);
+  set.catch(() => {
+    if (blobSetCache.get(key) === entry) blobSetCache.delete(key);
+  });
   return set;
 }
 
