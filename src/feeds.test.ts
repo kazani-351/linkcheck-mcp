@@ -194,3 +194,34 @@ test("blob cache: expires after its TTL, re-fetching so a cron refresh eventuall
     t.mock.timers.reset();
   }
 });
+
+test("concurrent lookups on a cold cache fetch and parse each blob ONCE (no stampede)", async () => {
+  _resetBlobCacheForTests();
+  let gets = 0;
+  const kv = {
+    async get() {
+      gets++;
+      await new Promise((r) => setTimeout(r, 5)); // let every caller start before the first resolves
+      return "evil.com\nbad.net";
+    },
+  };
+  const hits = await Promise.all(
+    Array.from({ length: 5 }, () => lookupDomainInBlob(kv, "feed:tif-domains", "a.evil.com", "T")),
+  );
+  assert.equal(gets, 1, "5 concurrent cold lookups must share one KV read + parse");
+  assert.ok(hits.every((h) => h?.matchedValue === "evil.com"));
+});
+
+test("a failed blob load is not cached — the next lookup retries", async () => {
+  _resetBlobCacheForTests();
+  let calls = 0;
+  const kv = {
+    async get() {
+      calls++;
+      if (calls === 1) throw new Error("KV down");
+      return "evil.com";
+    },
+  };
+  await assert.rejects(lookupDomainInBlob(kv, "feed:x", "evil.com", "T"));
+  assert.ok(await lookupDomainInBlob(kv, "feed:x", "evil.com", "T"));
+});
