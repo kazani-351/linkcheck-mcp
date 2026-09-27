@@ -21,7 +21,7 @@ import { computeVerdict, type Verdict } from "./scorer.ts";
 import { checkVirusTotal } from "./virustotal.ts";
 import { refreshAllFeeds } from "./refresh.ts";
 import { LANDING_HTML, SERVER_CARD_JSON, LINK_HEADER } from "./landing.ts";
-import { scanSkill, type SkillFile, type SkillScan } from "./skillscan.ts";
+import { scanSkill, type SkillFile, type SkillScan, type SkillVerdict } from "./skillscan.ts";
 import { parseGithubUrl, fetchSkillFromGithub, type GithubFetch } from "./github.ts";
 
 // Typed against the minimal (but write-capable, for the cron refresh path)
@@ -141,10 +141,14 @@ function toCompact(r: FullResult) {
 // check_skill (SPEC §7): the deterministic static scan (re-runnable, attestable)
 // is kept SEPARATE from the live URL reputation pass (time-varying), and the
 // overall verdict is the worst of the two. URLs are checked without VT (batch
-// rate-limit rule, same as check_text) and capped at MAX_SKILL_URLS.
-export const MAX_SKILL_URLS = 10;
+// rate-limit rule, same as check_text) and capped at MAX_SKILL_URLS — kept low
+// because each check is several subrequests and the GitHub fetch already spends
+// most of the ~50-per-invocation budget (see GITHUB_MAX_FILES in github.ts).
+export const MAX_SKILL_URLS = 5;
 
-type OverallVerdict = "DANGEROUS" | "SUSPICIOUS" | "NO_FLAGS";
+// One table for both verdict vocabularies, so a new value is a type error here
+// rather than an undefined that silently compares as "not worse".
+const SEVERITY: Record<Verdict | SkillVerdict, number> = { SAFE: 0, NO_FLAGS: 0, SUSPICIOUS: 1, DANGEROUS: 2 };
 
 export async function runCheckSkill(
   args: { files?: SkillFile[]; github_url?: string },
@@ -169,7 +173,7 @@ export async function runCheckSkill(
 
   const scan: SkillScan = await scanSkill(files);
 
-  const urlChecks: Array<{ url: string; verdict?: string; verdictReason?: string; error?: string }> = await Promise.all(
+  const urlChecks: Array<{ url: string; verdict?: Verdict; verdictReason?: string; error?: string }> = await Promise.all(
     scan.urls.slice(0, MAX_SKILL_URLS).map(async (url) => {
       try {
         const r = await checkOneUrl(url, env, false);
@@ -182,11 +186,11 @@ export async function runCheckSkill(
   if (scan.urls.length > MAX_SKILL_URLS) degraded.push(`url checks truncated: ${scan.urls.length} URLs, checked first ${MAX_SKILL_URLS}`);
   for (const u of urlChecks) if (u.error) degraded.push(`url check failed: ${u.url}`);
 
-  const rank = { NO_FLAGS: 0, SAFE: 0, SUSPICIOUS: 1, DANGEROUS: 2 } as const;
-  let overall: OverallVerdict = scan.verdict;
+  let overall: SkillVerdict = scan.verdict;
   for (const u of urlChecks) {
-    const v = (u.verdict ?? "SUSPICIOUS") as keyof typeof rank;
-    if (rank[v] > rank[overall]) overall = v as OverallVerdict;
+    // An errored check counts as SUSPICIOUS; a SAFE URL can't lower anything.
+    const v: Verdict = u.verdict ?? "SUSPICIOUS";
+    if (v !== "SAFE" && SEVERITY[v] > SEVERITY[overall]) overall = v;
   }
   // Never false-SAFE: an incomplete fetch or URL pass can't leave NO_FLAGS standing.
   if (overall === "NO_FLAGS" && degraded.length) overall = "SUSPICIOUS";

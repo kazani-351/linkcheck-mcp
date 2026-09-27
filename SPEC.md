@@ -154,7 +154,7 @@ Cron Trigger (17 6 * * * daily) — refresh.ts: BUILT + live. D1 feeds
 
 ---
 
-## 7. Tools (MCP surface — 2 in v1 per tool-count discipline; `check_skill` added 2026-09-27)
+## 7. Tools (MCP surface — `check_url` + `check_text` in v1; `check_skill` added 2026-09-27, 3 total)
 
 ### `check_url`
 - **Input:** `{ url: string (http/https only), compact?: boolean }`
@@ -199,7 +199,9 @@ Cron Trigger (17 6 * * * daily) — refresh.ts: BUILT + live. D1 feeds
 - **Two verdicts, kept apart:** `scan.verdict` is deterministic (same files + same `scanner.version`/`rulesHash` → same result; this is what skill-attest re-runs). `overallVerdict` = worst of scan + live URL checks, and is time-varying.
 - **Never false-SAFE:** best verdict is `NO_FLAGS`, never `SAFE`. Missing SKILL.md, binary/oversize files, fetch failures, truncation, or a failed URL check → at least SUSPICIOUS.
 - **Body-GET exception (§11):** the only place the Worker GETs file bodies — GitHub's own hosts only, skill source text only, never executed. Target URLs stay HEAD-only.
-- **Limits:** 200 files, 512 KB/file, 2 MB total; public repos only; unauthenticated GitHub API (60 req/h per egress IP — 3 calls per scan) → 403/429 fails loud with "pass files directly".
+- **Limits:** scanner caps 200 files / 512 KB per file / 2 MB total (`files` input). The GitHub path fetches at most **20** files and checks at most **5** URLs, because a free-plan Worker invocation gets ~50 subrequests: 3 API calls + 20 raw fetches + 5 URL checks (each HEAD hops + DoH) has to fit. Over either cap → `degraded` + SUSPICIOUS floor, and a fetch that throws (e.g. the subrequest cap) is recorded per file, never silent. Public repos only; unauthenticated GitHub API (60 req/h per egress IP) → 403/429 fails loud with "pass files directly". Every GitHub response is checked to have stayed on `api.github.com` / `raw.githubusercontent.com` after redirects, and the commit id must be a 40-hex SHA before it's put in a URL.
+- **`compact: true`** → `{overallVerdict, overallReason, source, digestSetHash, findings, degraded}`.
+- **Scanner version:** `skillscan@0.2.0` (0.1.0 never left the machine). Bump on any change to rules OR hashing — `rulesHash` only catches rule changes.
 - **Shared code:** `src/skillscan.ts` is vendored byte-for-byte into the skill-attest CLI (~/Desktop/skill-attest). Change it in one place, copy, and bump `SCANNER_VERSION`.
 
 ### v1.1 tools
@@ -245,7 +247,7 @@ Cron Trigger (17 6 * * * daily) — refresh.ts: BUILT + live. D1 feeds
 
 ## 11. Security Posture
 
-- **HEAD-first** resolution (GET-headers-only fallback per §9); never downloads/executes target bodies.
+- **HEAD-first** resolution (GET-headers-only fallback per §9); never downloads/executes target bodies. **One exception (2026-09-27):** `check_skill` GETs skill source files from `api.github.com` / `raw.githubusercontent.com` only, pinned to a commit SHA, host re-checked after redirects, never executed (§7). These are the skill's own text, not a target being inspected.
 - **SSRF guard (right-sized for Workers):** a Worker runs at Cloudflare's edge with no adjacent private network, so classic private-IP SSRF is largely moot here (no localhost/RFC1918 neighbor to pivot to). Keep a *lightweight* guard — reject obvious private/loopback/link-local ranges + cloud-metadata IPs as defense-in-depth — but do not over-invest; verify Workers `fetch` egress behavior at build rather than assuming a self-hosted threat model.
 - **Auth:** bearer token via `wrangler secret`. `createMcpHandler` does **not** verify tokens itself — the Worker `fetch()` wrapper checks the token and returns 401 *before* delegating to the handler (still true — the code is unchanged). Nothing secret in repo; `.env`/`.dev.vars`/`.mcp.json` gitignored before first commit; `.dev.vars` for local. **Public-phase upgrade path:** swap the token gate for `@cloudflare/workers-oauth-provider` / Cloudflare Access (first-class in the Agents SDK) — the seam is the `fetch()` wrapper, so no handler rewrite.
   - **Status (2026-08-15): running AUTHLESS by deliberate choice, not oversight.** Real-world blocker: Claude's native "Add custom connector" UI only supports OAuth (DCR/CIMD) or `static_headers` (currently beta, not exposed in this UI) for remote MCP servers — a plain bearer-token header isn't an available option today (confirmed against Anthropic's own connector-auth docs and a matching open GitHub issue). Rather than build a full OAuth authorization server just to connect the tool for personal use, `MCP_BEARER_TOKEN` was deleted (`wrangler secret delete`) so the existing `if (token && ...)` gate naturally no-ops — zero code change, fully reversible by re-running `wrangler secret put`. Risk accepted deliberately: the tool is read-only (no destructive actions, no PII), so real exposure is quota abuse (D1/VT rate limits), not a data breach — but this is a genuine security-posture reversal made consciously, the same day the repo goes public, not a silent regression. Revisit with real OAuth (DCR/CIMD) if `static_headers` doesn't leave beta and quota abuse becomes a real problem.
@@ -273,9 +275,9 @@ Cron Trigger (17 6 * * * daily) — refresh.ts: BUILT + live. D1 feeds
 ## 13. Anti-Criteria (testable must-not-happens)
 
 - **AC1 (primary):** `check_url` MUST NOT return `verdict:"SAFE"` when any signal check failed to run. *Probe:* disable the URLhaus fetch, check any URL → assert verdict ≠ SAFE and `degraded` non-empty.
-- **AC2:** server MUST NOT issue a full-GET/body fetch of a target. *Probe:* inspect outbound requests during a check → assert HEAD only.
+- **AC2:** server MUST NOT issue a full-GET/body fetch of a target. *Probe:* inspect outbound requests during a check → assert HEAD only. (Exception: `check_skill`'s GitHub source fetch, §11, which is not a target check. URLs found *inside* a skill still go through the HEAD-only `check_url` path.)
 - **AC3:** server MUST NOT resolve/fetch a target that maps to a private IP range. *Probe:* `check_url("http://169.254.169.254/")` → refused, not fetched.
-- **AC4:** v1 MUST NOT expose allowlist/history tools (they're v1.1). *Probe:* `tools/list` returns exactly `check_url`, `check_text`.
+- **AC4:** MUST NOT expose allowlist/history tools (they're v1.1). *Probe:* `tools/list` returns exactly `check_url`, `check_text`, `check_skill` (updated 2026-09-27; enforced by `src/index.test.ts`).
 
 ---
 

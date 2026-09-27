@@ -417,9 +417,20 @@ async function toolPayload(res: Response) {
 }
 const TIDY = "---\nname: tidy\ndescription: formats tables\n---\nReformat the table.\n";
 
-test("tools/list includes check_skill", async () => {
+test("tools/list returns exactly check_url, check_text, check_skill (SPEC AC4)", async () => {
   const res = await worker.fetch(mcpReq({ jsonrpc: "2.0", id: 6, method: "tools/list" }, "test-secret"), ENV, ctx);
-  assert.match(await res.text(), /"name":"check_skill"/);
+  const rpc = JSON.parse((await res.text()).split("data: ")[1]);
+  assert.deepEqual(rpc.result.tools.map((t: { name: string }) => t.name).sort(), ["check_skill", "check_text", "check_url"]);
+});
+
+test("check_skill: URL-check truncation is degraded → a clean scan can't stay NO_FLAGS", async () => {
+  const urls = Array.from({ length: 7 }, (_, i) => `https://u${i}.invalid/`).join("\n");
+  const { text } = await toolPayload(await callTool("check_skill", { files: [{ path: "SKILL.md", content: TIDY + urls + "\n" }] }));
+  const p = JSON.parse(text);
+  assert.equal(p.scan.verdict, "NO_FLAGS");
+  assert.equal(p.urlChecks.length, 5);
+  assert.ok(p.degraded.some((d: string) => d.startsWith("url checks truncated")));
+  assert.notEqual(p.overallVerdict, "NO_FLAGS");
 });
 
 test("check_skill: clean skill with no URLs → NO_FLAGS with SEP-2640 digests", async () => {

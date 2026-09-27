@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseGithubUrl, fetchSkillFromGithub } from "./github.ts";
+import { parseGithubUrl, fetchSkillFromGithub, GITHUB_MAX_FILES } from "./github.ts";
 
 test("parseGithubUrl shapes", () => {
   assert.deepEqual(parseGithubUrl("https://github.com/a/b"), { owner: "a", repo: "b", ref: null, path: "" });
@@ -11,6 +11,14 @@ test("parseGithubUrl shapes", () => {
   assert.deepEqual(parseGithubUrl("https://github.com/a/b/blob/v1/skills/x/SKILL.md"), {
     owner: "a", repo: "b", ref: "v1", path: "skills/x",
   });
+  // a blob of any file means that file's folder, not a folder named after the file
+  assert.deepEqual(parseGithubUrl("https://github.com/a/b/blob/v1/skills/x/run.sh"), {
+    owner: "a", repo: "b", ref: "v1", path: "skills/x",
+  });
+  assert.equal(parseGithubUrl("https://github.com/a/b/blob/v1/SKILL.md")?.path, "");
+  // percent-escapes are decoded once, so later encoding isn't doubled
+  assert.equal(parseGithubUrl("https://github.com/a/b/tree/main/my%20skill")?.path, "my skill");
+  assert.equal(parseGithubUrl("https://github.com/a/b/tree/%E0%A4%A")?.path, undefined);
   assert.equal(parseGithubUrl("https://gitlab.com/a/b"), null);
   assert.equal(parseGithubUrl("https://github.com/a"), null);
   assert.equal(parseGithubUrl("https://github.com/a/b/issues/1"), null);
@@ -69,4 +77,32 @@ test("a failed raw fetch is reported in degraded", async () => {
   const r = await fetchSkillFromGithub({ owner: "o", repo: "r", ref: "main", path: "" }, f);
   assert.deepEqual(r.files, []);
   assert.match(r.degraded[0], /fetch failed \(404\): SKILL\.md/);
+});
+
+test("a redirect off GitHub's hosts is refused", async () => {
+  const f = (async () => {
+    const r = new Response(SHA);
+    Object.defineProperty(r, "url", { value: "https://evil.example/x" });
+    return r;
+  }) as unknown as typeof fetch;
+  await assert.rejects(fetchSkillFromGithub({ owner: "o", repo: "r", ref: "main", path: "" }, f), /redirected off GitHub hosts/);
+});
+
+test("a non-SHA commit id is refused before it reaches a URL", async () => {
+  const f = fakeFetch({ "https://api.github.com/repos/o/r/commits/main": () => new Response("../../x") });
+  await assert.rejects(fetchSkillFromGithub({ owner: "o", repo: "r", ref: "main", path: "" }, f), /unexpected commit id/);
+});
+
+test("over the subrequest budget → truncated + degraded; a throwing fetch → degraded", async () => {
+  const tree = Array.from({ length: GITHUB_MAX_FILES + 3 }, (_, i) => ({ path: `f${String(i).padStart(2, "0")}.md`, type: "blob", size: 1 }));
+  const routes: Record<string, () => Response> = {
+    "https://api.github.com/repos/o/r/commits/main": () => new Response(SHA),
+    [`https://api.github.com/repos/o/r/git/trees/${SHA}?recursive=1`]: () => Response.json({ tree }),
+  };
+  for (const e of tree) routes[`https://raw.githubusercontent.com/o/r/${SHA}/${e.path}`] = () => new Response("x");
+  routes[`https://raw.githubusercontent.com/o/r/${SHA}/f00.md`] = () => { throw new Error("Too many subrequests"); };
+  const r = await fetchSkillFromGithub({ owner: "o", repo: "r", ref: "main", path: "" }, fakeFetch(routes));
+  assert.equal(r.files.length, GITHUB_MAX_FILES - 1);
+  assert.ok(r.degraded.some((d) => d.startsWith("truncated:")));
+  assert.ok(r.degraded.some((d) => d.includes("Too many subrequests") && d.endsWith("f00.md")));
 });

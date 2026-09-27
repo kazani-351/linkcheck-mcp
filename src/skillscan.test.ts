@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { scanSkill, digestSetHash, readFrontmatter, rulesHash } from "./skillscan.ts";
+import { scanSkill, digestSetHash, readFrontmatter, rulesHash, MAX_FILES } from "./skillscan.ts";
 
 const SKILL = `---
 name: tidy
@@ -126,4 +126,18 @@ test("self-modification needs a write, not a mention", async () => {
     const r = await scanSkill([{ path: "SKILL.md", content: SKILL + line + "\n" }]);
     assert.ok(r.findings.some((f) => f.rule === "self-modification"), line);
   }
+});
+
+test("truncation keeps the same files whatever the input order", async () => {
+  const files = Array.from({ length: MAX_FILES + 5 }, (_, i) => ({ path: `f${String(i).padStart(3, "0")}.md`, content: String(i) }));
+  const a = await scanSkill([{ path: "SKILL.md", content: SKILL }, ...files]);
+  const b = await scanSkill([...files].reverse().concat([{ path: "SKILL.md", content: SKILL }]));
+  assert.equal(a.digestSetHash, b.digestSetHash);
+  assert.equal(a.verdict, "SUSPICIOUS");
+});
+
+test("scanner source contains no literal invisible characters", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("./skillscan.ts", import.meta.url), "utf8");
+  assert.ok(!/[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/.test(src));
 });

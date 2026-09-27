@@ -13,7 +13,12 @@
 // → same findings and verdict, so anyone can re-run it ("verifiable, not trusted").
 
 export const SCANNER_NAME = "skillscan";
-export const SCANNER_VERSION = "0.1.0";
+export const SCANNER_VERSION = "0.2.0";
+
+// Zero-width, bidi-override and Unicode tag characters. Written as escapes on
+// purpose: literal invisible characters in source can't be reviewed, and this
+// file would flag itself.
+const HIDDEN_SRC = String.raw`[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]|\uDB40[\uDC00-\uDC7F]`;
 
 export const MAX_FILES = 200;
 export const MAX_FILE_BYTES = 512 * 1024;
@@ -75,7 +80,7 @@ export const RULES: readonly Rule[] = [
     id: "hidden-text",
     severity: "high",
     why: "invisible or direction-overriding characters can hide instructions from a human reviewer",
-    re: /[​-‏‪-‮⁠-⁤⁦-⁩﻿]|\uDB40[\uDC00-\uDC7F]/,
+    re: new RegExp(HIDDEN_SRC),
   },
   {
     id: "injection-phrasing",
@@ -189,7 +194,12 @@ function normalizePath(p: string): string {
 
 export async function scanSkill(input: SkillFile[]): Promise<SkillScan> {
   const degraded: string[] = [];
-  let files = input.map((f) => ({ path: normalizePath(f.path), content: f.content, bytes: f.bytes }));
+  // Code-unit order, not localeCompare — locale collation differs across
+  // runtimes, which would break "same input → same scan" between CLI and Worker.
+  // Sorted BEFORE truncation so which files survive the cap is order-independent.
+  let files = input
+    .map((f) => ({ path: normalizePath(f.path), content: f.content, bytes: f.bytes }))
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
   if (files.length > MAX_FILES) {
     degraded.push(`truncated: ${files.length} files, scanned first ${MAX_FILES}`);
@@ -202,9 +212,7 @@ export async function scanSkill(input: SkillFile[]): Promise<SkillScan> {
   const urls = new Set<string>();
   let total = 0;
 
-  // Code-unit order, not localeCompare — locale collation differs across
-  // runtimes, which would break "same input → same scan" between CLI and Worker.
-  for (const f of [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
+  for (const f of files) {
     const bytes = f.bytes ?? enc.encode(f.content);
     resources.push({ path: f.path, digest: "sha256:" + (await sha256Hex(bytes)), size: bytes.length });
     total += bytes.length;
@@ -275,7 +283,7 @@ export async function scanSkill(input: SkillFile[]): Promise<SkillScan> {
 // Render invisible characters as <U+XXXX> so the excerpt shows the reviewer
 // what's actually there instead of hiding it again.
 function visible(s: string): string {
-  return s.replace(/[​-‏‪-‮⁠-⁤⁦-⁩﻿]|\uDB40[\uDC00-\uDC7F]/g, (c) =>
+  return s.replace(new RegExp(HIDDEN_SRC, "g"), (c) =>
     `<U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}>`,
   );
 }
