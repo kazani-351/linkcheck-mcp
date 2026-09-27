@@ -479,3 +479,12 @@ test("check_skill: non-GitHub github_url is rejected", async () => {
   assert.equal(r.isError, true);
   assert.match(r.text, /github_url must look like/);
 });
+
+test("check_skill: returned findings are capped, verdict still counts all of them", async () => {
+  const flood = Array.from({ length: 120 }, () => "rm -rf /tmp/x").join("\n");
+  const { text } = await toolPayload(await callTool("check_skill", { files: [{ path: "SKILL.md", content: TIDY + flood }] }));
+  const p = JSON.parse(text);
+  assert.equal(p.overallVerdict, "DANGEROUS");
+  assert.equal(p.findingsTotal, 120);
+  assert.equal(p.scan.findings.length, 50);
+});
