@@ -21,7 +21,7 @@ import { computeVerdict, type Verdict } from "./scorer.ts";
 import { checkVirusTotal } from "./virustotal.ts";
 import { refreshAllFeeds } from "./refresh.ts";
 import { LANDING_HTML, SERVER_CARD_JSON, LINK_HEADER } from "./landing.ts";
-import { scanSkill, type SkillFile, type SkillScan, type SkillVerdict } from "./skillscan.ts";
+import { scanSkill, type SkillFile, type SkillVerdict } from "./skillscan.ts";
 import { parseGithubUrl, fetchSkillFromGithub, type GithubFetch } from "./github.ts";
 
 // Typed against the minimal (but write-capable, for the cron refresh path)
@@ -138,17 +138,34 @@ function toCompact(r: FullResult) {
   };
 }
 
+// One severity table for both verdict vocabularies (check_url's SAFE… and
+// check_skill's NO_FLAGS…), shared by check_text and check_skill, so a new
+// value is a type error rather than an undefined that compares as "not worse".
+const SEVERITY: Record<Verdict | SkillVerdict, number> = { SAFE: 0, NO_FLAGS: 0, SUSPICIOUS: 1, DANGEROUS: 2 };
+
+type UrlCheck = { url: string; error?: string } & Partial<FullResult>;
+
+/** check_text's first pass and check_skill's URL pass: every URL through
+ *  checkOneUrl with VT OFF (SPEC §7 batch rule — VT's free tier is 4/min),
+ *  a throw becoming { url, error } instead of failing the whole batch. */
+function checkUrlsNoVt(urls: string[], env: Env): Promise<UrlCheck[]> {
+  return Promise.all(
+    urls.map(async (url) => {
+      try {
+        return { url, ...(await checkOneUrl(url, env, false)) };
+      } catch (e) {
+        return { url, error: (e as Error).message };
+      }
+    }),
+  );
+}
+
 // check_skill (SPEC §7): the deterministic static scan (re-runnable, attestable)
 // is kept SEPARATE from the live URL reputation pass (time-varying), and the
-// overall verdict is the worst of the two. URLs are checked without VT (batch
-// rate-limit rule, same as check_text) and capped at MAX_SKILL_URLS — kept low
-// because each check is several subrequests and the GitHub fetch already spends
-// most of the ~50-per-invocation budget (see GITHUB_MAX_FILES in github.ts).
+// overall verdict is the worst of the two. URLs are capped at MAX_SKILL_URLS —
+// kept low because each check is several subrequests and the GitHub fetch
+// already spends most of the ~50-per-invocation budget (GITHUB_MAX_FILES).
 export const MAX_SKILL_URLS = 5;
-
-// One table for both verdict vocabularies, so a new value is a type error here
-// rather than an undefined that silently compares as "not worse".
-const SEVERITY: Record<Verdict | SkillVerdict, number> = { SAFE: 0, NO_FLAGS: 0, SUSPICIOUS: 1, DANGEROUS: 2 };
 
 export async function runCheckSkill(
   args: { files?: SkillFile[]; github_url?: string },
@@ -159,45 +176,40 @@ export async function runCheckSkill(
 
   let files: SkillFile[];
   let source: GithubFetch["source"] | null = null;
-  const degraded: string[] = [];
+  let fetchDegraded: string[] = [];
   if (args.github_url) {
     const target = parseGithubUrl(args.github_url);
     if (!target) throw new Error("github_url must look like https://github.com/{owner}/{repo}[/tree/{ref}/{path}]");
-    const fetched = await fetchSkillFromGithub(target);
-    files = fetched.files;
-    source = fetched.source;
-    degraded.push(...fetched.degraded);
+    ({ files, source, degraded: fetchDegraded } = await fetchSkillFromGithub(target));
   } else {
     files = args.files!;
   }
 
-  const scan: SkillScan = await scanSkill(files);
+  const scan = await scanSkill(files);
+  const checked = await checkUrlsNoVt(scan.urls.slice(0, MAX_SKILL_URLS), env);
+  const urlChecks = checked.map((c) => ({ url: c.url, verdict: c.verdict, verdictReason: c.verdictReason, error: c.error }));
 
-  const urlChecks: Array<{ url: string; verdict?: Verdict; verdictReason?: string; error?: string }> = await Promise.all(
-    scan.urls.slice(0, MAX_SKILL_URLS).map(async (url) => {
-      try {
-        const r = await checkOneUrl(url, env, false);
-        return { url, verdict: r.verdict, verdictReason: r.verdictReason };
-      } catch (e) {
-        return { url, error: (e as Error).message };
-      }
-    }),
-  );
-  if (scan.urls.length > MAX_SKILL_URLS) degraded.push(`url checks truncated: ${scan.urls.length} URLs, checked first ${MAX_SKILL_URLS}`);
-  for (const u of urlChecks) if (u.error) degraded.push(`url check failed: ${u.url}`);
+  // Every reason the result is incomplete, in one list: scan-side (binary,
+  // size, missing SKILL.md), fetch-side, and URL-side.
+  const degraded = [
+    ...scan.degraded,
+    ...fetchDegraded,
+    ...(scan.urls.length > MAX_SKILL_URLS ? [`url checks truncated: ${scan.urls.length} URLs, checked first ${MAX_SKILL_URLS}`] : []),
+    ...urlChecks.filter((u) => u.error).map((u) => `url check failed: ${u.url}`),
+  ];
 
-  let overall: SkillVerdict = scan.verdict;
-  for (const u of urlChecks) {
-    // An errored check counts as SUSPICIOUS; a SAFE URL can't lower anything.
-    const v: Verdict = u.verdict ?? "SUSPICIOUS";
-    if (v !== "SAFE" && SEVERITY[v] > SEVERITY[overall]) overall = v;
-  }
-  // Never false-SAFE: an incomplete fetch or URL pass can't leave NO_FLAGS standing.
-  if (overall === "NO_FLAGS" && degraded.length) overall = "SUSPICIOUS";
+  // One fold over SkillVerdict. URL verdicts map in at the boundary (SAFE is
+  // NO_FLAGS here), and "incomplete" is itself a SUSPICIOUS input — never false-SAFE.
+  const inputs: SkillVerdict[] = [
+    scan.verdict,
+    ...urlChecks.flatMap((u) => (u.verdict && u.verdict !== "SAFE" ? [u.verdict] : [])),
+    ...(degraded.length ? (["SUSPICIOUS"] as const) : []),
+  ];
+  const overall = inputs.reduce((w, v) => (SEVERITY[v] > SEVERITY[w] ? v : w));
 
   const badUrls = urlChecks.filter((u) => u.verdict && u.verdict !== "SAFE");
   const overallReason =
-    overall === scan.verdict && !badUrls.length && !degraded.length
+    !badUrls.length && !degraded.length
       ? `static scan: ${scan.verdictReason}`
       : [
           `static scan: ${scan.verdict}`,
@@ -249,28 +261,16 @@ function createServer(env: Env): McpServer {
     },
     async ({ text, compact }: { text: string; compact?: boolean }) => {
       const extracted = extractUrls(text);
-      const order = { SAFE: 0, SUSPICIOUS: 1, DANGEROUS: 2 } as const;
-
       // First pass: no VT (SPEC §7 rate-limit guard — one call per URL would
       // exceed VT's 4/min free tier on any blob with more than a few links).
-      type CheckedEntry = { url: string; error?: string } & Partial<FullResult>;
-      const firstPass: CheckedEntry[] = await Promise.all(
-        extracted.urls.map(async (url) => {
-          try {
-            const result = await checkOneUrl(url, env, false);
-            return { url, ...result };
-          } catch (e) {
-            return { url, error: (e as Error).message };
-          }
-        }),
-      );
+      const firstPass = await checkUrlsNoVt(extracted.urls, env);
 
       // Second pass: re-check ONLY the single worst candidate with VT on, if
       // it's already SUSPICIOUS+ from cheaper signals and a VT key exists.
       let worstIdx = -1;
       for (let i = 0; i < firstPass.length; i++) {
         const v = firstPass[i].verdict;
-        if (v && order[v] > (worstIdx >= 0 ? order[firstPass[worstIdx].verdict as Verdict] : -1)) worstIdx = i;
+        if (v && SEVERITY[v] > (worstIdx >= 0 ? SEVERITY[firstPass[worstIdx].verdict as Verdict] : -1)) worstIdx = i;
       }
       if (worstIdx >= 0 && firstPass[worstIdx].verdict !== "SAFE" && env.VIRUSTOTAL_API_KEY) {
         try {
@@ -283,7 +283,7 @@ function createServer(env: Env): McpServer {
 
       const checked = firstPass.map((c) => (compact && "verdict" in c && c.verdict ? { url: c.url, ...toCompact(c as FullResult) } : c));
       const worstVerdict = firstPass.reduce<string>(
-        (worst, c) => (c.verdict && order[c.verdict] > (order[worst as Verdict] ?? -1) ? c.verdict : worst),
+        (worst, c) => (c.verdict && SEVERITY[c.verdict] > (SEVERITY[worst as Verdict] ?? -1) ? c.verdict : worst),
         "SAFE",
       );
       const result = {
@@ -323,7 +323,7 @@ function createServer(env: Env): McpServer {
               source: r.source,
               digestSetHash: r.scan.digestSetHash,
               findings: r.scan.findings,
-              degraded: [...r.scan.degraded, ...r.degraded],
+              degraded: r.degraded,
             }
           : r;
         return { content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }] };

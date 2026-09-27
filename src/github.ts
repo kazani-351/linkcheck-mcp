@@ -7,7 +7,7 @@
 // raw.githubusercontent.com) and never executed — not an arbitrary target URL,
 // which stays HEAD-only per the §11 posture.
 
-import { MAX_FILES, MAX_FILE_BYTES, MAX_TOTAL_BYTES, type SkillFile } from "./skillscan.ts";
+import { MAX_FILE_BYTES, MAX_TOTAL_BYTES, type SkillFile } from "./skillscan.ts";
 
 export interface GithubTarget {
   owner: string;
@@ -46,30 +46,29 @@ export function parseGithubUrl(input: string): GithubTarget | null {
   const repo = rawRepo.replace(/\.git$/, "");
   if (!kind) return { owner, repo, ref: null, path: "" };
   if ((kind !== "tree" && kind !== "blob") || !ref) return null;
-  let path = rest.join("/");
   // A blob URL points at a file; the skill is the folder that holds it.
-  if (kind === "blob") path = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+  const path = (kind === "blob" ? rest.slice(0, -1) : rest).join("/");
   return { owner, repo, ref, path };
 }
 
 type Fetcher = typeof fetch;
 
 const API_HEADERS = { "user-agent": "linkcheck-mcp", accept: "application/vnd.github+json" };
-const GITHUB_HOSTS = new Set(["api.github.com", "raw.githubusercontent.com"]);
 
 // Subrequest budget: a Worker invocation on the free plan gets ~50 outbound
-// fetches. Up to 3 API calls + GITHUB_MAX_FILES raw fetches + check_skill's URL
-// checks (each HEAD hops + DoH) must fit, so the GitHub path fetches far fewer
-// files than skillscan's own MAX_FILES. Over budget → degraded, never silent.
+// fetches. 2 API calls + GITHUB_MAX_FILES raw fetches + check_skill's URL checks
+// (each HEAD hops + DoH) must fit. Over budget → degraded, never silent.
 export const GITHUB_MAX_FILES = 20;
+// Workers allow 6 simultaneous open connections per invocation.
+const RAW_CONCURRENCY = 6;
 
-/** fetch that refuses to have followed a redirect off GitHub's own hosts —
- *  the body-GET exception (SPEC §11) holds only for these hosts. */
-async function githubFetch(doFetch: Fetcher, url: string, init: RequestInit): Promise<Response> {
-  const r = await doFetch(url, init);
-  const finalHost = r.url ? new URL(r.url).hostname : new URL(url).hostname;
-  if (!GITHUB_HOSTS.has(finalHost)) throw new Error(`GitHub response redirected off GitHub hosts (${finalHost}) — refusing`);
-  return r;
+const decoder = new TextDecoder();
+
+/** Every GitHub request refuses redirects outright, so the body-GET exception
+ *  (SPEC §11) can't be walked off api.github.com / raw.githubusercontent.com —
+ *  a 3xx comes back as a non-ok response and fails loud. */
+function githubFetch(doFetch: Fetcher, url: string, headers: Record<string, string>): Promise<Response> {
+  return doFetch(url, { headers, redirect: "manual" });
 }
 
 export async function fetchSkillFromGithub(target: GithubTarget, doFetch: Fetcher = fetch): Promise<GithubFetch> {
@@ -77,66 +76,79 @@ export async function fetchSkillFromGithub(target: GithubTarget, doFetch: Fetche
   const base = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
   const degraded: string[] = [];
 
-  let ref = target.ref;
-  if (!ref) {
-    const r = await githubFetch(doFetch, base, { headers: API_HEADERS });
-    if (!r.ok) throw new Error(githubError(r.status, `${owner}/${repo}`));
-    ref = ((await r.json()) as { default_branch: string }).default_branch;
+  async function api(route: string, what: string, accept = API_HEADERS.accept): Promise<Response> {
+    const r = await githubFetch(doFetch, base + route, { ...API_HEADERS, accept });
+    if (!r.ok) throw new Error(githubError(r.status, what));
+    return r;
   }
 
-  const c = await githubFetch(doFetch, `${base}/commits/${encodeURIComponent(ref)}`, {
-    headers: { ...API_HEADERS, accept: "application/vnd.github.sha" },
-  });
-  if (!c.ok) throw new Error(githubError(c.status, `${owner}/${repo}@${ref}`));
+  // "HEAD" resolves the default branch in the same call (verified 2026-09-27).
+  const ref = target.ref ?? "HEAD";
+  const c = await api(`/commits/${encodeURIComponent(ref)}`, `${owner}/${repo}@${ref}`, "application/vnd.github.sha");
   const commit = (await c.text()).trim();
   if (!/^[0-9a-f]{40}$/.test(commit)) throw new Error(`GitHub returned an unexpected commit id for ${owner}/${repo}@${ref}`);
 
-  const t = await githubFetch(doFetch, `${base}/git/trees/${commit}?recursive=1`, { headers: API_HEADERS });
-  if (!t.ok) throw new Error(githubError(t.status, `tree ${commit}`));
+  const t = await api(`/git/trees/${commit}?recursive=1`, `tree ${commit}`);
   const tree = (await t.json()) as { tree: Array<{ path: string; type: string; size?: number }>; truncated?: boolean };
   if (tree.truncated) degraded.push("GitHub tree listing truncated — repo too large; some files may be missing");
 
   const prefix = path ? path.replace(/\/$/, "") + "/" : "";
   let blobs = tree.tree.filter((e) => e.type === "blob" && (prefix === "" || e.path.startsWith(prefix)));
   if (blobs.length === 0) throw new Error(`no files under '${path || "/"}' at ${commit.slice(0, 7)}`);
-  const limit = Math.min(MAX_FILES, GITHUB_MAX_FILES);
-  if (blobs.length > limit) {
-    degraded.push(`truncated: ${blobs.length} files, fetched first ${limit} (pass files directly to scan all)`);
-    blobs = blobs.slice(0, limit);
+  if (blobs.length > GITHUB_MAX_FILES) {
+    degraded.push(`truncated: ${blobs.length} files, fetched first ${GITHUB_MAX_FILES} (pass files directly to scan all)`);
+    blobs = blobs.slice(0, GITHUB_MAX_FILES);
   }
 
-  const files: SkillFile[] = [];
+  // Choose what to fetch from the tree's sizes first, so the size budget is
+  // deterministic, then fetch in a small pool instead of one at a time.
+  const wanted: typeof blobs = [];
   let total = 0;
   for (const b of blobs) {
-    const rel = b.path.slice(prefix.length);
-    if ((b.size ?? 0) > MAX_FILE_BYTES || total + (b.size ?? 0) > MAX_TOTAL_BYTES) {
-      degraded.push(`not fetched (size limit): ${rel}`);
+    const size = b.size ?? 0;
+    if (size > MAX_FILE_BYTES || total + size > MAX_TOTAL_BYTES) {
+      degraded.push(`not fetched (size limit): ${b.path.slice(prefix.length)}`);
       continue;
     }
-    try {
-      const raw = await githubFetch(
-        doFetch,
-        `https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${commit}/${b.path.split("/").map(encodeURIComponent).join("/")}`,
-        { headers: { "user-agent": "linkcheck-mcp" } },
-      );
-      if (!raw.ok) {
-        degraded.push(`fetch failed (${raw.status}): ${rel}`);
-        continue;
-      }
-      const bytes = new Uint8Array(await raw.arrayBuffer());
-      total += bytes.length;
-      files.push({ path: rel, content: new TextDecoder().decode(bytes), bytes });
-    } catch (e) {
-      // e.g. the Workers subrequest cap — record it and keep going; a partial
-      // fetch makes the result SUSPICIOUS upstream, never NO_FLAGS.
-      degraded.push(`fetch failed (${(e as Error).message}): ${rel}`);
-    }
+    total += size;
+    wanted.push(b);
   }
 
+  const results: Array<SkillFile | string> = new Array(wanted.length);
+  let next = 0;
+  async function worker() {
+    while (next < wanted.length) {
+      const i = next++;
+      const b = wanted[i];
+      const rel = b.path.slice(prefix.length);
+      try {
+        const raw = await githubFetch(
+          doFetch,
+          `https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${commit}/${b.path.split("/").map(encodeURIComponent).join("/")}`,
+          { "user-agent": "linkcheck-mcp" },
+        );
+        if (!raw.ok) {
+          results[i] = `fetch failed (${raw.status}): ${rel}`;
+          continue;
+        }
+        const bytes = new Uint8Array(await raw.arrayBuffer());
+        results[i] = { path: rel, content: decoder.decode(bytes), bytes };
+      } catch (e) {
+        // e.g. the Workers subrequest cap — record it and keep going; a partial
+        // fetch makes the result SUSPICIOUS upstream, never NO_FLAGS.
+        results[i] = `fetch failed (${(e as Error).message}): ${rel}`;
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(RAW_CONCURRENCY, wanted.length) }, worker));
+
+  const files: SkillFile[] = [];
+  for (const r of results) typeof r === "string" ? degraded.push(r) : files.push(r);
   return { files, source: { owner, repo, commit, path }, degraded };
 }
 
 function githubError(status: number, what: string): string {
+  if (status >= 300 && status < 400) return `GitHub redirected (${status}) for ${what} — redirects are refused; if the repo was renamed, use its current URL`;
   if (status === 403 || status === 429) return `GitHub rate limit or access denied (${status}) for ${what} — retry later or pass files directly`;
   if (status === 404) return `not found on GitHub (404): ${what} — private repos aren't supported, and a branch name containing "/" can't be read from the URL; pass files directly in either case`;
   return `GitHub API error ${status} for ${what}`;

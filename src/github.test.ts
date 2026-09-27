@@ -38,8 +38,7 @@ function fakeFetch(routes: Record<string, () => Response>): typeof fetch {
 
 test("fetches only files under the skill path, pinned to the commit SHA", async () => {
   const f = fakeFetch({
-    "https://api.github.com/repos/o/r": () => Response.json({ default_branch: "main" }),
-    "https://api.github.com/repos/o/r/commits/main": () => new Response(SHA + "\n"),
+    "https://api.github.com/repos/o/r/commits/HEAD": () => new Response(SHA + "\n"),
     [`https://api.github.com/repos/o/r/git/trees/${SHA}?recursive=1`]: () =>
       Response.json({
         tree: [
@@ -79,13 +78,14 @@ test("a failed raw fetch is reported in degraded", async () => {
   assert.match(r.degraded[0], /fetch failed \(404\): SKILL\.md/);
 });
 
-test("a redirect off GitHub's hosts is refused", async () => {
-  const f = (async () => {
-    const r = new Response(SHA);
-    Object.defineProperty(r, "url", { value: "https://evil.example/x" });
-    return r;
-  }) as unknown as typeof fetch;
-  await assert.rejects(fetchSkillFromGithub({ owner: "o", repo: "r", ref: "main", path: "" }, f), /redirected off GitHub hosts/);
+test("redirects are refused: every GitHub fetch uses redirect:manual and a 3xx fails loud", async () => {
+  const seen: Array<RequestRedirect | undefined> = [];
+  const f = (async (_u: RequestInfo | URL, init?: RequestInit) => {
+    seen.push(init?.redirect);
+    return new Response(null, { status: 301, headers: { location: "https://evil.example/" } });
+  }) as typeof fetch;
+  await assert.rejects(fetchSkillFromGithub({ owner: "o", repo: "r", ref: "main", path: "" }, f), /redirected \(301\)/);
+  assert.deepEqual(seen, ["manual"]);
 });
 
 test("a non-SHA commit id is refused before it reaches a URL", async () => {

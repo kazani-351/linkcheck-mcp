@@ -157,7 +157,14 @@ async function sha256Hex(data: Uint8Array | string): Promise<string> {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-export async function rulesHash(): Promise<string> {
+let rulesHashMemo: Promise<string> | undefined;
+
+/** Constant per build, so computed once. */
+export function rulesHash(): Promise<string> {
+  return (rulesHashMemo ??= computeRulesHash());
+}
+
+async function computeRulesHash(): Promise<string> {
   const canon = RULES.map((r) => `${r.id}\t${r.severity}\t${r.re.source}\t${r.re.flags}`).join("\n");
   return "sha256:" + (await sha256Hex(SCANNER_VERSION + "\n" + canon));
 }
@@ -221,7 +228,7 @@ export async function scanSkill(input: SkillFile[]): Promise<SkillScan> {
       degraded.push(`not scanned (size limit): ${f.path}`);
       continue;
     }
-    if (bytes.includes(0) || f.content.includes("\u0000")) {
+    if (bytes.includes(0)) {
       degraded.push(`not scanned (binary): ${f.path}`);
       continue;
     }
@@ -240,25 +247,26 @@ export async function scanSkill(input: SkillFile[]): Promise<SkillScan> {
           });
         }
       }
-      for (const u of text.match(URL_RE) ?? []) urls.add(u.replace(/[.,;:]+$/, ""));
     });
+    for (const u of f.content.match(URL_RE) ?? []) urls.add(u.replace(/[.,;:]+$/, ""));
   }
 
   const skillMd = files.find((f) => /(^|\/)SKILL\.md$/.test(f.path));
   if (!skillMd) degraded.push("no SKILL.md found");
   const fm = skillMd ? readFrontmatter(skillMd.content) : {};
 
+  const ruleIds = (list: Finding[]) => [...new Set(list.map((f) => f.rule))].join(", ");
   const high = findings.filter((f) => f.severity === "high");
   const medium = findings.filter((f) => f.severity === "medium");
   let verdict: SkillVerdict;
   let verdictReason: string;
   if (high.length) {
     verdict = "DANGEROUS";
-    verdictReason = `${high.length} high-severity finding(s): ${[...new Set(high.map((f) => f.rule))].join(", ")}`;
+    verdictReason = `${high.length} high-severity finding(s): ${ruleIds(high)}`;
   } else if (medium.length || degraded.length) {
     verdict = "SUSPICIOUS";
     verdictReason = medium.length
-      ? `${medium.length} finding(s) needing review: ${[...new Set(medium.map((f) => f.rule))].join(", ")}`
+      ? `${medium.length} finding(s) needing review: ${ruleIds(medium)}`
       : `scan incomplete: ${degraded.join("; ")}`;
   } else {
     verdict = "NO_FLAGS";
@@ -282,8 +290,10 @@ export async function scanSkill(input: SkillFile[]): Promise<SkillScan> {
 
 // Render invisible characters as <U+XXXX> so the excerpt shows the reviewer
 // what's actually there instead of hiding it again.
+const HIDDEN_GLOBAL = new RegExp(HIDDEN_SRC, "g");
+
 function visible(s: string): string {
-  return s.replace(new RegExp(HIDDEN_SRC, "g"), (c) =>
+  return s.replace(HIDDEN_GLOBAL, (c) =>
     `<U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}>`,
   );
 }
