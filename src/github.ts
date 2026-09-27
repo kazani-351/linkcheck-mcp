@@ -96,9 +96,9 @@ export async function fetchSkillFromGithub(target: GithubTarget, doFetch: Fetche
       degraded.push(`fetch failed (${raw.status}): ${rel}`);
       continue;
     }
-    const content = await raw.text();
-    total += b.size ?? content.length;
-    files.push({ path: rel, content });
+    const bytes = new Uint8Array(await raw.arrayBuffer());
+    total += bytes.length;
+    files.push({ path: rel, content: new TextDecoder().decode(bytes), bytes });
   }
 
   return { files, source: { owner, repo, commit, path }, degraded };

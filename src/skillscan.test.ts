@@ -100,3 +100,16 @@ test("frontmatter reader handles quotes and missing block", () => {
   assert.deepEqual(readFrontmatter('---\nname: "x"\ndescription: y\n---\n'), { name: "x", description: "y" });
   assert.deepEqual(readFrontmatter("# no frontmatter"), {});
 });
+
+test("digest is over raw bytes when provided (binary-safe, SEP-2640)", async () => {
+  const raw = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0xff, 0x00]);
+  const r = await scanSkill([
+    { path: "SKILL.md", content: SKILL },
+    { path: "a.png", content: new TextDecoder().decode(raw), bytes: raw },
+  ]);
+  const png = r.resources.find((x) => x.path === "a.png")!;
+  const expect = [...new Uint8Array(await crypto.subtle.digest("SHA-256", raw))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  assert.equal(png.digest, "sha256:" + expect);
+  assert.equal(png.size, 6);
+  assert.ok(r.degraded.some((d) => d === "not scanned (binary): a.png"));
+});

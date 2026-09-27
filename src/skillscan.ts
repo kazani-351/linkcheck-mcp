@@ -106,6 +106,10 @@ export const RULES: readonly Rule[] = [
 export interface SkillFile {
   path: string;
   content: string;
+  /** Raw bytes, when available. SEP-2640 digests are over raw bytes, so a caller
+   *  holding them (CLI disk read, GitHub arrayBuffer) must pass them — decoding a
+   *  binary to a string and re-encoding it would change the hash. */
+  bytes?: Uint8Array;
 }
 
 export interface Finding {
@@ -183,7 +187,7 @@ function normalizePath(p: string): string {
 
 export async function scanSkill(input: SkillFile[]): Promise<SkillScan> {
   const degraded: string[] = [];
-  let files = input.map((f) => ({ path: normalizePath(f.path), content: f.content }));
+  let files = input.map((f) => ({ path: normalizePath(f.path), content: f.content, bytes: f.bytes }));
 
   if (files.length > MAX_FILES) {
     degraded.push(`truncated: ${files.length} files, scanned first ${MAX_FILES}`);
@@ -199,7 +203,7 @@ export async function scanSkill(input: SkillFile[]): Promise<SkillScan> {
   // Code-unit order, not localeCompare — locale collation differs across
   // runtimes, which would break "same input → same scan" between CLI and Worker.
   for (const f of [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
-    const bytes = enc.encode(f.content);
+    const bytes = f.bytes ?? enc.encode(f.content);
     resources.push({ path: f.path, digest: "sha256:" + (await sha256Hex(bytes)), size: bytes.length });
     total += bytes.length;
 
@@ -207,7 +211,7 @@ export async function scanSkill(input: SkillFile[]): Promise<SkillScan> {
       degraded.push(`not scanned (size limit): ${f.path}`);
       continue;
     }
-    if (f.content.includes("\u0000")) {
+    if (bytes.includes(0) || f.content.includes("\u0000")) {
       degraded.push(`not scanned (binary): ${f.path}`);
       continue;
     }
