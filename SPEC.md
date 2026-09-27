@@ -154,7 +154,7 @@ Cron Trigger (17 6 * * * daily) — refresh.ts: BUILT + live. D1 feeds
 
 ---
 
-## 7. Tools (MCP surface — kept to 2 in v1 per tool-count discipline)
+## 7. Tools (MCP surface — 2 in v1 per tool-count discipline; `check_skill` added 2026-09-27)
 
 ### `check_url`
 - **Input:** `{ url: string (http/https only), compact?: boolean }`
@@ -191,6 +191,16 @@ Cron Trigger (17 6 * * * daily) — refresh.ts: BUILT + live. D1 feeds
 - **URL cap:** extract at most **20** URLs per blob; if more are present, process the first 20 and return `truncated: true` with the count dropped (fail-loud, never silent). Prevents a crafted blob from amplifying into hundreds of outbound HEADs through the Worker.
 - **Bare-domain guard:** a bare token only counts as a domain if its suffix is on a real public-suffix (TLD) list — avoids treating `report.final`, `e.g.`, version strings as URLs.
 - **VirusTotal in batch:** OFF by default. Only after cheaper signals mark a URL SUSPICIOUS+ is that single worst candidate VT-checked (stays under VT's 4/min free limit). Single-URL `check_url` may VT normally.
+
+### `check_skill` (added 2026-09-27)
+- **Input:** `{ files?: [{path, content}], github_url?: string, compact?: boolean }` — exactly one of `files` / `github_url`.
+- **Why here:** scanning a skill is a URL-safety problem one level up — a skill is model input that tells an agent what to fetch and run. linkcheck adds what a plain static scanner can't: every URL the skill references goes through `checkOneUrl` (feeds, heuristics, no VT).
+- **Behavior:** (github_url) resolve ref → commit SHA → recursive tree → fetch blobs under the skill path from `raw.githubusercontent.com` at that SHA. Then `src/skillscan.ts`: per-file sha256 + size (SEP-2640 `resources` shape), `digestSetHash` over sorted `path\0digest`, line-level rule findings (remote-exec, secret-exfil, credential-path, destructive, git-push, install-hook, hidden-text, injection-phrasing = high; self-modification, code-execution, network = medium), URL extraction. Then up to 10 URLs → `checkOneUrl(url, env, false)`.
+- **Two verdicts, kept apart:** `scan.verdict` is deterministic (same files + same `scanner.version`/`rulesHash` → same result; this is what skill-attest re-runs). `overallVerdict` = worst of scan + live URL checks, and is time-varying.
+- **Never false-SAFE:** best verdict is `NO_FLAGS`, never `SAFE`. Missing SKILL.md, binary/oversize files, fetch failures, truncation, or a failed URL check → at least SUSPICIOUS.
+- **Body-GET exception (§11):** the only place the Worker GETs file bodies — GitHub's own hosts only, skill source text only, never executed. Target URLs stay HEAD-only.
+- **Limits:** 200 files, 512 KB/file, 2 MB total; public repos only; unauthenticated GitHub API (60 req/h per egress IP — 3 calls per scan) → 403/429 fails loud with "pass files directly".
+- **Shared code:** `src/skillscan.ts` is vendored byte-for-byte into the skill-attest CLI (~/Desktop/skill-attest). Change it in one place, copy, and bump `SCANNER_VERSION`.
 
 ### v1.1 tools
 - `manage_list({action:"add_allow|remove_allow|add_block|remove_block|list", domain?})`

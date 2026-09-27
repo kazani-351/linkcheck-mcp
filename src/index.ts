@@ -21,6 +21,8 @@ import { computeVerdict, type Verdict } from "./scorer.ts";
 import { checkVirusTotal } from "./virustotal.ts";
 import { refreshAllFeeds } from "./refresh.ts";
 import { LANDING_HTML, SERVER_CARD_JSON, LINK_HEADER } from "./landing.ts";
+import { scanSkill, type SkillFile, type SkillScan } from "./skillscan.ts";
+import { parseGithubUrl, fetchSkillFromGithub, type GithubFetch } from "./github.ts";
 
 // Typed against the minimal (but write-capable, for the cron refresh path)
 // interfaces feeds.ts/refresh.ts actually use, rather than the full
@@ -136,6 +138,74 @@ function toCompact(r: FullResult) {
   };
 }
 
+// check_skill (SPEC §7): the deterministic static scan (re-runnable, attestable)
+// is kept SEPARATE from the live URL reputation pass (time-varying), and the
+// overall verdict is the worst of the two. URLs are checked without VT (batch
+// rate-limit rule, same as check_text) and capped at MAX_SKILL_URLS.
+export const MAX_SKILL_URLS = 10;
+
+type OverallVerdict = "DANGEROUS" | "SUSPICIOUS" | "NO_FLAGS";
+
+export async function runCheckSkill(
+  args: { files?: SkillFile[]; github_url?: string },
+  env: Env,
+) {
+  const hasFiles = Array.isArray(args.files) && args.files.length > 0;
+  if (hasFiles === !!args.github_url) throw new Error("pass exactly one of 'files' or 'github_url'");
+
+  let files: SkillFile[];
+  let source: GithubFetch["source"] | null = null;
+  const degraded: string[] = [];
+  if (args.github_url) {
+    const target = parseGithubUrl(args.github_url);
+    if (!target) throw new Error("github_url must look like https://github.com/{owner}/{repo}[/tree/{ref}/{path}]");
+    const fetched = await fetchSkillFromGithub(target);
+    files = fetched.files;
+    source = fetched.source;
+    degraded.push(...fetched.degraded);
+  } else {
+    files = args.files!;
+  }
+
+  const scan: SkillScan = await scanSkill(files);
+
+  const urlChecks: Array<{ url: string; verdict?: string; verdictReason?: string; error?: string }> = await Promise.all(
+    scan.urls.slice(0, MAX_SKILL_URLS).map(async (url) => {
+      try {
+        const r = await checkOneUrl(url, env, false);
+        return { url, verdict: r.verdict, verdictReason: r.verdictReason };
+      } catch (e) {
+        return { url, error: (e as Error).message };
+      }
+    }),
+  );
+  if (scan.urls.length > MAX_SKILL_URLS) degraded.push(`url checks truncated: ${scan.urls.length} URLs, checked first ${MAX_SKILL_URLS}`);
+  for (const u of urlChecks) if (u.error) degraded.push(`url check failed: ${u.url}`);
+
+  const rank = { NO_FLAGS: 0, SAFE: 0, SUSPICIOUS: 1, DANGEROUS: 2 } as const;
+  let overall: OverallVerdict = scan.verdict;
+  for (const u of urlChecks) {
+    const v = (u.verdict ?? "SUSPICIOUS") as keyof typeof rank;
+    if (rank[v] > rank[overall]) overall = v as OverallVerdict;
+  }
+  // Never false-SAFE: an incomplete fetch or URL pass can't leave NO_FLAGS standing.
+  if (overall === "NO_FLAGS" && degraded.length) overall = "SUSPICIOUS";
+
+  const badUrls = urlChecks.filter((u) => u.verdict && u.verdict !== "SAFE");
+  const overallReason =
+    overall === scan.verdict && !badUrls.length && !degraded.length
+      ? `static scan: ${scan.verdictReason}`
+      : [
+          `static scan: ${scan.verdict}`,
+          badUrls.length ? `${badUrls.length} URL(s) flagged: ${badUrls.map((u) => `${u.url} → ${u.verdict}`).join(", ")}` : null,
+          degraded.length ? `incomplete: ${degraded.join("; ")}` : null,
+        ]
+          .filter(Boolean)
+          .join(" | ");
+
+  return { overallVerdict: overall, overallReason, source, scan, urlChecks, degraded };
+}
+
 function createServer(env: Env): McpServer {
   const server = new McpServer({ name: "linkcheck-mcp", version: "0.1.0" });
 
@@ -219,6 +289,46 @@ function createServer(env: Env): McpServer {
         droppedCount: extracted.droppedCount,
       };
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  server.registerTool(
+    "check_skill",
+    {
+      description:
+        "Statically scan an agent skill (a SKILL.md folder) before installing or loading it: flags remote code execution, secret exfiltration, credential access, destructive commands, hidden characters and instruction-override phrasing with file:line evidence, checks every URL the skill references against threat feeds, and returns per-file sha256 digests (MCP Skills extension / SEP-2640 shape) pinning exactly what was scanned. Pass either the skill's files or a public GitHub URL. Best verdict is NO_FLAGS, never SAFE — a static scan cannot prove safety.",
+      inputSchema: {
+        files: z
+          .array(z.object({ path: z.string(), content: z.string() }))
+          .optional()
+          .describe("The skill's files: paths relative to the skill folder (SKILL.md at root) and their text content"),
+        github_url: z
+          .string()
+          .optional()
+          .describe("Public GitHub URL of the skill folder, e.g. https://github.com/owner/repo/tree/main/skills/name"),
+        compact: z.boolean().optional().describe("Return only verdict, reason, source, digestSetHash, findings and degraded"),
+      },
+    },
+    async ({ files, github_url, compact }: { files?: SkillFile[]; github_url?: string; compact?: boolean }) => {
+      try {
+        const r = await runCheckSkill({ files, github_url }, env);
+        const payload = compact
+          ? {
+              overallVerdict: r.overallVerdict,
+              overallReason: r.overallReason,
+              source: r.source,
+              digestSetHash: r.scan.digestSetHash,
+              findings: r.scan.findings,
+              degraded: [...r.scan.degraded, ...r.degraded],
+            }
+          : r;
+        return { content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }] };
+      } catch (e) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${(e as Error).message}` }],
+          isError: true,
+        };
+      }
     },
   );
 

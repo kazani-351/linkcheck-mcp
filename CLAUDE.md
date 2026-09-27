@@ -18,6 +18,7 @@ return a tiered verdict + evidence. Full design in **[SPEC.md](SPEC.md)** — re
 - **Verdict cache is keyed on the normalized INPUT url**, not the resolved URL (a hit must skip resolution).
 - **URLhaus:** exact-URL hit → DANGEROUS; domain-only hit → SUSPICIOUS (compromised-legit-host nuance).
 - **check_text:** cap 20 URLs/blob (`truncated` flag), TLD-suffix gate on bare domains, VT off in batch (worst-candidate only).
+- **check_skill:** scan verdict (deterministic, `src/skillscan.ts`, shared with skill-attest) stays separate from the live URL-check verdict; best is NO_FLAGS never SAFE; the GitHub fetch in `src/github.ts` is the ONLY body-GET and is GitHub-hosts-only (SPEC §7).
 - **Auth:** bearer token checked in the Worker `fetch()` wrapper before the handler. Handler does not verify tokens.
 
 ## Secrets
