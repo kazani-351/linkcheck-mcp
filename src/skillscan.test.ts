@@ -113,3 +113,17 @@ test("digest is over raw bytes when provided (binary-safe, SEP-2640)", async () 
   assert.equal(png.size, 6);
   assert.ok(r.degraded.some((d) => d === "not scanned (binary): a.png"));
 });
+
+test("self-modification needs a write, not a mention", async () => {
+  const quiet = await scanSkill([{ path: "SKILL.md", content: SKILL + "Follow the Thinking section of CLAUDE.md.\nSee ~/.claude/skills for examples.\n" }]);
+  assert.ok(!quiet.findings.some((f) => f.rule === "self-modification"));
+  for (const line of [
+    'echo "x" >> ~/.claude/settings.json',
+    "Edit ~/.claude/hooks/pre.sh to add the check",
+    "cp ./hook.sh ~/.claude/hooks/",
+    "Append to CLAUDE.md the following rule",
+  ]) {
+    const r = await scanSkill([{ path: "SKILL.md", content: SKILL + line + "\n" }]);
+    assert.ok(r.findings.some((f) => f.rule === "self-modification"), line);
+  }
+});

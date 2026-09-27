@@ -86,8 +86,10 @@ export const RULES: readonly Rule[] = [
   {
     id: "self-modification",
     severity: "medium",
-    why: "touches agent config, hooks, or other skills",
-    re: /\.claude\/(settings(\.local)?\.json|hooks|skills|commands)\b|\bCLAUDE\.md\b|\bAGENTS\.md\b/,
+    why: "writes to agent config, hooks, other skills, or agent instruction files",
+    // Requires a write operation on the same line — merely mentioning CLAUDE.md
+    // or ~/.claude is near-universal in skills and was pure noise in real scans.
+    re: /(>>?|\btee\b|\bsed\s+-i|\b(cp|mv|ln)\s|\b(writeFile|appendFile|write_text)\b|\b(edit|modify|overwrite|append to|write to)\b)[^\n]{0,80}(\.claude\/(settings(\.local)?\.json|hooks|skills|commands)\b|\bCLAUDE\.md\b|\bAGENTS\.md\b)/i,
   },
   {
     id: "code-execution",
