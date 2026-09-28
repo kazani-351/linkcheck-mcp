@@ -18,7 +18,10 @@ export const SCANNER_VERSION = "0.2.0";
 // Zero-width, bidi-override and Unicode tag characters. Written as escapes on
 // purpose: literal invisible characters in source can't be reviewed, and this
 // file would flag itself.
-export const HIDDEN_SRC = String.raw`[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]|\uDB40[\uDC00-\uDC7F]`;
+// INVISIBLE_SRC is the zero-width/bidi half on its own (hidden.ts decodes tag
+// characters separately); HIDDEN_SRC's text — and so the rules hash — is unchanged.
+export const INVISIBLE_SRC = String.raw`[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]`;
+export const HIDDEN_SRC = `${INVISIBLE_SRC}|${String.raw`\uDB40[\uDC00-\uDC7F]`}`;
 
 export const MAX_FILES = 200;
 export const MAX_FILE_BYTES = 512 * 1024;

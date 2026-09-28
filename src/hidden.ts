@@ -8,7 +8,7 @@
 // handling (no DOM in Workers without a dependency): nested same-name hidden
 // elements are cut at the first closing tag, which still surfaces the text.
 
-import { HIDDEN_SRC, visible } from "./skillscan.ts";
+import { INVISIBLE_SRC, visible } from "./skillscan.ts";
 
 export const MAX_HIDDEN_FINDINGS = 20;
 const MAX_EXCERPT = 200;
@@ -49,12 +49,11 @@ export interface HiddenResult {
 // Unicode tag block U+E0000–E007F: invisible, but U+E0020–E007E map 1:1 onto
 // printable ASCII, so a run of them is a hidden plain-text message.
 const TAG_RUN = /[\u{E0000}-\u{E007F}]+/gu;
-const TAG_CHAR = /[\u{E0000}-\u{E007F}]/u;
 // Subdivision flag emoji (England, Scotland, Wales) are U+1F3F4 followed by a
 // lowercase tag-letter code and CANCEL TAG — tag characters with a real job.
 const BLACK_FLAG = 0x1f3f4;
 const FLAG_TAGS = /^[\u{E0030}-\u{E0039}\u{E0061}-\u{E007A}]{2,7}\u{E007F}$/u;
-const HIDDEN_ANY = new RegExp(HIDDEN_SRC, "g");
+const INVISIBLE = new RegExp(INVISIBLE_SRC, "g");
 
 // ZWJ/ZWNJ are legitimate inside emoji sequences and in Indic/Persian script
 // shaping; a leading BOM is an encoding artifact. None of those hide anything.
@@ -92,46 +91,60 @@ function findClose(window: string, tag: string): number {
   return -1;
 }
 
+const UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
+// Most BASE64 candidates are URL paths and ids that decode to binary noise;
+// rejecting control bytes on the atob string skips the costly fatal-decode throw.
+const CONTROL_BYTES = /[\x00-\x08\x0E-\x1F\x7F]/;
+const PRINTABLE = /[\p{L}\p{N}\p{P}\p{Zs}]/gu;
+
 /** Decode a base64/base64url token, or null unless it's readable text with words
  *  in it. Hex ids and API tokens decode to binary noise and fail the check. */
 function decodeBase64Text(token: string): string | null {
   const b64 = token.replace(/-/g, "+").replace(/_/g, "/").replace(/=+$/, "");
   if (b64.length % 4 === 1) return null;
-  let bytes: Uint8Array;
-  try {
-    bytes = Uint8Array.from(atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4)), (c) => c.charCodeAt(0));
-  } catch {
-    return null;
-  }
   let text: string;
   try {
-    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
+    const binary = atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4));
+    if (CONTROL_BYTES.test(binary)) return null;
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    text = UTF8.decode(bytes);
   } catch {
     return null;
   }
-  const printable = [...text].filter((c) => /[\p{L}\p{N}\p{P}\p{Zs}]/u.test(c)).length;
-  // Base64'd JSON is routine plumbing (analytics payloads, JWT segments).
-  if (/^\s*[{[]/.test(text)) return null;
+  const printable = text.match(PRINTABLE)?.length ?? 0;
   return printable / Math.max(1, [...text].length) >= 0.9 && wordCount(text) >= 3 ? text : null;
 }
 
 export function surfaceHidden(text: string): HiddenResult {
-  const all: HiddenFinding[] = [];
+  // Strong and weak kept apart so strong ones lead: padding a page with
+  // comments can't push them past the cap.
+  const strong: HiddenFinding[] = [];
+  const weak: HiddenFinding[] = [];
+  const add = (f: HiddenFinding) => (f.signal === "strong" ? strong : weak).push(f);
   const decoded: string[] = [];
+  const addDecoded = (msg: string) => {
+    if (decoded.length < MAX_HIDDEN_FINDINGS) decoded.push(msg.slice(0, MAX_SPAN));
+  };
 
   for (const m of text.matchAll(TAG_RUN)) {
     const run = m[0];
     if (text.codePointAt(m.index! - 2) === BLACK_FLAG && FLAG_TAGS.test(run)) continue;
     const msg = decodeTags(run);
     if (!msg) continue;
-    if (decoded.length < MAX_HIDDEN_FINDINGS) decoded.push(msg.slice(0, MAX_SPAN));
-    all.push({ kind: "unicode-tags", signal: "strong", why: "invisible Unicode tag characters spell out hidden text", excerpt: excerpt(msg) });
+    addDecoded(msg);
+    add({ kind: "unicode-tags", signal: "strong", why: "invisible Unicode tag characters spell out hidden text", excerpt: excerpt(msg) });
   }
 
-  const invisible = [...text.replace(BENIGN_JOINERS, "").matchAll(HIDDEN_ANY)].filter(([c]) => !TAG_CHAR.test(c));
-  if (invisible.length) {
-    const kinds = [...new Set(invisible.map(([c]) => visible(c)))].join(" ");
-    all.push({ kind: "invisible-chars", signal: "strong", why: `${invisible.length} zero-width or direction-override character(s)`, excerpt: kinds });
+  let invisibleCount = 0;
+  const invisibleKinds = new Set<string>();
+  for (const [c] of text.replace(BENIGN_JOINERS, "").matchAll(INVISIBLE)) {
+    invisibleCount++;
+    invisibleKinds.add(c);
+  }
+  if (invisibleCount) {
+    const kinds = [...invisibleKinds].map(visible).join(" ");
+    add({ kind: "invisible-chars", signal: "strong", why: `${invisibleCount} zero-width or direction-override character(s)`, excerpt: kinds });
   }
 
   // indexOf, not a lazy regex: /<!--[\s\S]*?-->/ rescans to the end of the
@@ -141,7 +154,7 @@ export function surfaceHidden(text: string): HiddenResult {
     const close = text.indexOf("-->", open + 4);
     const body = text.slice(open + 4, Math.min(close === -1 ? text.length : close, open + 4 + MAX_SPAN));
     if (!/^\s*\[if\b/i.test(body) && wordCount(body) >= 3) {
-      all.push({ kind: "html-comment", signal: "weak", why: "sentence in an HTML comment (not rendered)", excerpt: excerpt(body) });
+      add({ kind: "html-comment", signal: "weak", why: "sentence in an HTML comment (not rendered)", excerpt: excerpt(body) });
     }
     if (close === -1) break;
     open = text.indexOf("<!--", close + 3);
@@ -161,24 +174,27 @@ export function surfaceHidden(text: string): HiddenResult {
     scannedUntil = start + (close === -1 ? window.length : close);
     const inner = window.slice(0, close === -1 ? undefined : close).replace(/<[^>]*>/g, " ");
     if (wordCount(inner) < 3) continue;
-    all.push({ kind: "hidden-element", signal: "weak", why: `text inside a hidden <${tag.toLowerCase()}> (display:none, hidden, zero size or opacity)`, excerpt: excerpt(inner) });
+    add({ kind: "hidden-element", signal: "weak", why: `text inside a hidden <${tag.toLowerCase()}> (display:none, hidden, zero size or opacity)`, excerpt: excerpt(inner) });
   }
 
   // ids can't legally contain spaces, so a sentence there is only for a reader
   // of the raw HTML — i.e. an agent. Underscore-joined ids are NOT flagged:
   // every Wikipedia section anchor looks like Prompt_injection_and_jailbreak.
   for (const [, , value] of text.matchAll(ID_ATTR)) {
-    if (/\s/.test(value.trim()) && wordCount(value) >= 3) all.push({ kind: "id-sentence", signal: "strong", why: "a sentence inside an HTML id attribute", excerpt: excerpt(value) });
+    if (!/\s/.test(value.trim()) || wordCount(value) < 3) continue;
+    add({ kind: "id-sentence", signal: "strong", why: "a sentence inside an HTML id attribute", excerpt: excerpt(value) });
   }
 
   for (const [token] of text.matchAll(BASE64)) {
     const msg = decodeBase64Text(token);
     if (!msg) continue;
-    if (decoded.length < MAX_HIDDEN_FINDINGS) decoded.push(msg.slice(0, MAX_SPAN));
-    all.push({ kind: "base64-text", signal: "strong", why: "base64 that decodes to readable text", excerpt: excerpt(msg) });
+    // URLs inside get checked either way, but base64'd JSON is routine plumbing
+    // (analytics payloads, JWT segments), so it isn't reported as hidden text.
+    addDecoded(msg);
+    if (/^\s*[{[]/.test(msg)) continue;
+    add({ kind: "base64-text", signal: "strong", why: "base64 that decodes to readable text", excerpt: excerpt(msg) });
   }
 
-  // Strong first, so padding a page with comments can't push them past the cap.
-  const ranked = [...all.filter((f) => f.signal === "strong"), ...all.filter((f) => f.signal === "weak")];
-  return { found: ranked[0]?.signal === "strong", findings: ranked.slice(0, MAX_HIDDEN_FINDINGS), total: all.length, decoded };
+  const ranked = [...strong, ...weak];
+  return { found: strong.length > 0, findings: ranked.slice(0, MAX_HIDDEN_FINDINGS), total: ranked.length, decoded };
 }

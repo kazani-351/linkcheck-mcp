@@ -279,11 +279,10 @@ function createServer(env: Env): McpServer {
       },
     },
     async ({ text, compact }: { text: string; compact?: boolean }) => {
-      // Hidden content first, so URLs that only exist in decoded form (tag
-      // chars, base64) get checked too. Comments/attributes are already raw text.
+      // Hidden content first, and its decoded text goes FIRST into extraction:
+      // extractUrls keeps only MAX_URLS, and a URL someone bothered to hide
+      // (tag chars, base64) matters more than a visible one.
       const hidden = surfaceHidden(text);
-      // Decoded text goes FIRST: extractUrls keeps only the first MAX_URLS, and
-      // a URL someone bothered to hide matters more than a visible one.
       const extracted = extractUrls([...hidden.decoded, text].join("\n"));
       // First pass: no VT (SPEC §7 rate-limit guard — one call per URL would
       // exceed VT's 4/min free tier on any blob with more than a few links).
