@@ -29,7 +29,7 @@ export const SERVER_CARD = {
     {
       name: "check_text",
       description:
-        "Extract every URL from a block of text (including bare and defanged forms like hxxp://evil[.]com), check each, and return the worst verdict.",
+        "Extract every URL from a block of text (including bare and defanged forms like hxxp://evil[.]com), check each, and return the worst verdict. Also surfaces hidden content (Unicode tag text, zero-width characters, base64 text, hidden elements).",
     },
   ],
 } as const;
@@ -111,7 +111,7 @@ export const LANDING_HTML = `<!doctype html>
     <div class="tool"><code>check_url(url, compact?)</code>
       <p>Resolve one URL and return a verdict with the full evidence trail. <code>compact:true</code> trims it to verdict / reason / resolvedUrl / degraded.</p></div>
     <div class="tool"><code>check_text(text, compact?)</code>
-      <p>Extract every URL from a blob — standard, bare, and defanged (<code>hxxp://evil[.]com</code>) — check each, and return a <code>worstVerdict</code> summary.</p></div>
+      <p>Extract every URL from a blob — standard, bare, and defanged (<code>hxxp://evil[.]com</code>) — check each, and return a <code>worstVerdict</code> summary. Also surfaces text hidden from a human reader (invisible Unicode, base64, comments, hidden elements) under <code>hiddenContent</code>.</p></div>
   </div>
   <p style="margin-top:.9rem;color:var(--muted);font-size:.9rem">There's also a plain <code>POST /check</code> REST endpoint (body <code>{url, compact?}</code>) for non-MCP clients — used by a local pre-flight hook that verifies links before an agent acts on them.</p>
 
