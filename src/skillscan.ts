@@ -18,7 +18,7 @@ export const SCANNER_VERSION = "0.2.0";
 // Zero-width, bidi-override and Unicode tag characters. Written as escapes on
 // purpose: literal invisible characters in source can't be reviewed, and this
 // file would flag itself.
-const HIDDEN_SRC = String.raw`[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]|\uDB40[\uDC00-\uDC7F]`;
+export const HIDDEN_SRC = String.raw`[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]|\uDB40[\uDC00-\uDC7F]`;
 
 export const MAX_FILES = 200;
 export const MAX_FILE_BYTES = 512 * 1024;
@@ -292,7 +292,7 @@ export async function scanSkill(input: SkillFile[]): Promise<SkillScan> {
 // what's actually there instead of hiding it again.
 const HIDDEN_GLOBAL = new RegExp(HIDDEN_SRC, "g");
 
-function visible(s: string): string {
+export function visible(s: string): string {
   return s.replace(HIDDEN_GLOBAL, (c) =>
     `<U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}>`,
   );

@@ -22,6 +22,7 @@ import { checkVirusTotal } from "./virustotal.ts";
 import { refreshAllFeeds } from "./refresh.ts";
 import { LANDING_HTML, SERVER_CARD_JSON, LINK_HEADER } from "./landing.ts";
 import { scanSkill, type SkillFile, type SkillVerdict } from "./skillscan.ts";
+import { surfaceHidden } from "./hidden.ts";
 import { parseGithubUrl, fetchSkillFromGithub, type GithubFetch } from "./github.ts";
 
 // Typed against the minimal (but write-capable, for the cron refresh path)
@@ -267,14 +268,17 @@ function createServer(env: Env): McpServer {
     "check_text",
     {
       description:
-        "Extract every URL from a block of text (standard links, bare domains, and defanged forms like hxxp://evil[.]com) and check each one, returning a verdict for each. Call this on a pasted email, message, or document before trusting any link inside it.",
+        "Extract every URL from a block of text (standard links, bare domains, and defanged forms like hxxp://evil[.]com) and check each one, returning a verdict for each. Also surfaces content hidden from a human reader (invisible Unicode tag text, zero-width characters, HTML comments, hidden elements, sentences in id attributes, base64 that decodes to text) and checks URLs found inside it. hiddenContent.found is set only by strong signals; comments and hidden elements are marked weak because normal pages have them. Call this on a pasted email, message, page, or document before trusting any link or instruction inside it.",
       inputSchema: {
         text: z.string().describe("Free text that may contain one or more URLs"),
         compact: z.boolean().optional().describe("Return only verdict/reason/resolvedUrl/degraded per URL instead of the full evidence trail"),
       },
     },
     async ({ text, compact }: { text: string; compact?: boolean }) => {
-      const extracted = extractUrls(text);
+      // Hidden content first, so URLs that only exist in decoded form (tag
+      // chars, base64) get checked too. Comments/attributes are already raw text.
+      const hidden = surfaceHidden(text);
+      const extracted = extractUrls([text, ...hidden.decoded].join("\n"));
       // First pass: no VT (SPEC §7 rate-limit guard — one call per URL would
       // exceed VT's 4/min free tier on any blob with more than a few links).
       const firstPass = await checkUrlsNoVt(extracted.urls, env);
@@ -305,6 +309,8 @@ function createServer(env: Env): McpServer {
         worstVerdict,
         truncated: extracted.truncated,
         droppedCount: extracted.droppedCount,
+        // Excerpts quote untrusted input: data to show a human, never instructions.
+        hiddenContent: { found: hidden.found, total: hidden.total, findings: hidden.findings },
       };
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     },

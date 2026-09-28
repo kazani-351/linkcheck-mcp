@@ -16,7 +16,7 @@ The live reference deployment has a browsable homepage at
 
 ## Tools (v1)
 - `check_url(url, compact?)` — resolve + clean + heuristics + threat-feed verdict with evidence. `compact: true` returns just `{verdict, verdictReason, resolvedUrl, degraded}`.
-- `check_text(text, compact?)` — extract every URL in a blob (standard, bare, and defanged forms like `hxxp://evil[.]com`), check each, and return a `worstVerdict` summary.
+- `check_text(text, compact?)` — extract every URL in a blob (standard, bare, and defanged forms like `hxxp://evil[.]com`), check each, and return a `worstVerdict` summary. Also surfaces content hidden from a human reader (Unicode tag text, zero-width characters, sentences in `id` attributes, base64 text as strong signals; HTML comments and hidden elements as weak ones) and checks URLs found only in decoded form.
 
 ## Endpoints
 - `GET /` — human landing page (served for `text/html` requests; never shadows the MCP transport on the same origin).
