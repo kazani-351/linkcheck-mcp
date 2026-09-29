@@ -35,11 +35,17 @@ export interface FeedHit {
  *  Deliberately stops one level short of a bare TLD (needs >=2 labels to match),
  *  so we never accidentally match on "com" itself. No public-suffix-list dependency
  *  in v1 (SPEC §20) — a rare over-broad match (e.g. a two-label "co.uk"-style TLD)
- *  is a missed edge case, not a false-safe. */
+ *  is a missed edge case, not a false-safe.
+ *  Capped to the MAX_CHAIN shortest suffixes: lookupDomain binds one SQL param
+ *  per entry and D1 allows 100 per query, so an attacker hostname with 110+
+ *  labels made the lookup throw. Feed entries are registrable domains or a few
+ *  labels deeper; the shortest suffixes are the ones that match. */
+const MAX_CHAIN = 10;
+
 function parentChain(hostname: string): string[] {
   const labels = hostname.toLowerCase().split(".");
   const chain: string[] = [];
-  for (let i = 0; i < labels.length - 1; i++) {
+  for (let i = Math.max(0, labels.length - 1 - MAX_CHAIN); i < labels.length - 1; i++) {
     chain.push(labels.slice(i).join("."));
   }
   return chain;

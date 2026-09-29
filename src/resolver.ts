@@ -74,7 +74,10 @@ export function assertHttpUrl(raw: string): URL {
 export function isPrivateHost(hostname: string): boolean {
   const h = hostname.toLowerCase().replace(/^\[|\]$/g, ""); // strip IPv6 brackets
   if (h === "localhost" || h.endsWith(".localhost")) return true;
-  if (h === "::1" || h.startsWith("fc") || h.startsWith("fd")) return true; // IPv6 loopback/ULA
+  // IPv6 loopback/ULA — only for IPv6 literals (they contain ":"). A bare
+  // startsWith("fd") also matched domain names like fdic.gov and let a redirect
+  // hop through any fc*/fd* domain stop resolution before the real destination.
+  if (h.includes(":") && (h === "::1" || h.startsWith("fc") || h.startsWith("fd"))) return true;
   const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (!m) return false;
   const [a, b] = [Number(m[1]), Number(m[2])];
