@@ -16,13 +16,13 @@ test("assertHttpUrl rejects non-http schemes and junk", () => {
 });
 
 test("isPrivateHost flags loopback, private, link-local, metadata", () => {
-  for (const h of ["localhost", "127.0.0.1", "10.0.0.1", "192.168.1.1", "172.16.0.1", "172.31.255.255", "169.254.169.254", "0.0.0.0", "::1"]) {
+  for (const h of ["localhost", "127.0.0.1", "10.0.0.1", "192.168.1.1", "172.16.0.1", "172.31.255.255", "169.254.169.254", "0.0.0.0", "::1", "[::1]", "fd00::1", "[fc00::1]"]) {
     assert.equal(isPrivateHost(h), true, `${h} should be private`);
   }
 });
 
 test("isPrivateHost allows public hosts", () => {
-  for (const h of ["8.8.8.8", "1.1.1.1", "github.com", "example.com", "172.32.0.1", "172.15.0.1"]) {
+  for (const h of ["8.8.8.8", "1.1.1.1", "github.com", "example.com", "172.32.0.1", "172.15.0.1", "fdic.gov", "fcbarcelona.com", "fd-login-verify.com"]) {
     assert.equal(isPrivateHost(h), false, `${h} should be public`);
   }
 });

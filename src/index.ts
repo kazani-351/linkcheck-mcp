@@ -305,10 +305,13 @@ function createServer(env: Env): McpServer {
       }
 
       const checked = firstPass.map((c) => (compact && "verdict" in c && c.verdict ? { url: c.url, ...toCompact(c as FullResult) } : c));
-      const worstVerdict = firstPass.reduce<string>(
-        (worst, c) => (c.verdict && SEVERITY[c.verdict] > (SEVERITY[worst as Verdict] ?? -1) ? c.verdict : worst),
-        "SAFE",
-      );
+      // A URL whose check threw counts as SUSPICIOUS, never skipped — otherwise
+      // one attacker-triggered error left worstVerdict at SAFE (AC1, and the
+      // same rule check_skill applies to its URL errors).
+      const worstVerdict = firstPass.reduce<Verdict>((worst, c) => {
+        const v = c.verdict ?? "SUSPICIOUS";
+        return SEVERITY[v] > SEVERITY[worst] ? v : worst;
+      }, "SAFE");
       const result = {
         checked,
         worstVerdict,

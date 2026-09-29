@@ -515,3 +515,28 @@ test("check_skill: returned findings are capped, verdict still counts all of the
   assert.equal(p.findingsTotal, 120);
   assert.equal(p.scan.findings.length, 50);
 });
+
+test("check_text: a URL whose check throws counts as SUSPICIOUS in worstVerdict, never skipped to SAFE", async () => {
+  _resetBlobCacheForTests();
+  // Private IP literal: resolver stops without a fetch, no DoH/Jev/VT — fully offline.
+  // The D1 lookup then throws, which is what an attacker-triggered error looks like.
+  const env = {
+    ...fakeEnv(),
+    FEEDS_DB: {
+      prepare() {
+        return { bind() { return { async all(): Promise<never> { throw new Error("too many SQL variables"); }, async run() { return { success: true }; } }; } };
+      },
+    },
+  };
+  const res = await worker.fetch(
+    mcpReq(
+      { jsonrpc: "2.0", id: 30, method: "tools/call", params: { name: "check_text", arguments: { text: "see http://10.0.0.1/x" } } },
+      "test-secret",
+    ),
+    env,
+    ctx,
+  );
+  const payload = JSON.parse(JSON.parse((await res.text()).split("data: ")[1]).result.content[0].text);
+  assert.ok(payload.checked[0].error, "expected the check to have errored");
+  assert.equal(payload.worstVerdict, "SUSPICIOUS");
+});

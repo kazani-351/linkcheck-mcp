@@ -225,3 +225,24 @@ test("a failed blob load is not cached — the next lookup retries", async () =>
   await assert.rejects(lookupDomainInBlob(kv, "feed:x", "evil.com", "T"));
   assert.ok(await lookupDomainInBlob(kv, "feed:x", "evil.com", "T"));
 });
+
+test("lookupDomain: a 110+ label hostname stays under D1's 100-param limit and still matches", async () => {
+  let maxParams = 0;
+  const db: MinimalD1 = {
+    prepare() {
+      return {
+        bind(...values: unknown[]) {
+          maxParams = Math.max(maxParams, values.length);
+          return {
+            async all<T>() {
+              return { results: (values.includes("evil.com") ? [{ domain: "evil.com", source: "TEST" }] : []) as T[] };
+            },
+          };
+        },
+      };
+    },
+  };
+  const hit = await lookupDomain(db, "a.".repeat(110) + "evil.com");
+  assert.ok(maxParams <= 100, `bound ${maxParams} params`);
+  assert.equal(hit?.matchedValue, "evil.com");
+});
