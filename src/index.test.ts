@@ -634,3 +634,12 @@ test("owner token must match exactly: prefix, longer, and empty tokens are rejec
     assert.equal((await publicCheck("/check", { authorization: auth })).virusTotalChecked, false, auth);
   }
 });
+
+test("POST /check rejects an oversized url before resolving it", async () => {
+  const res = await worker.fetch(
+    new Request("http://localhost/check", { method: "POST", body: JSON.stringify({ url: "https://example.com/" + "a".repeat(9000) }) }),
+    PUBLIC_ENV,
+    ctx,
+  );
+  assert.equal(res.status, 400);
+});

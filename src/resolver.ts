@@ -78,7 +78,16 @@ export function isPrivateHost(hostname: string): boolean {
   // IPv6 loopback/ULA — only for IPv6 literals (they contain ":"). A bare
   // startsWith("fd") also matched domain names like fdic.gov and let a redirect
   // hop through any fc*/fd* domain stop resolution before the real destination.
-  if (h.includes(":") && (h === "::1" || h.startsWith("fc") || h.startsWith("fd"))) return true;
+  if (h.includes(":")) {
+    if (h === "::" || h === "::1" || h.startsWith("fc") || h.startsWith("fd") || /^fe[89ab]/.test(h)) return true; // unspecified, loopback, ULA, link-local
+    // IPv4-mapped (::ffff:127.0.0.1, which URL normalizes to ::ffff:7f00:1): judge the embedded IPv4.
+    const mapped = h.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    if (mapped) {
+      const hi = parseInt(mapped[1], 16), lo = parseInt(mapped[2], 16);
+      return isPrivateHost(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+    }
+    return false;
+  }
   const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (!m) return false;
   const [a, b] = [Number(m[1]), Number(m[2])];
@@ -86,6 +95,7 @@ export function isPrivateHost(hostname: string): boolean {
   if (a === 169 && b === 254) return true; // link-local (incl. cloud metadata 169.254.169.254)
   if (a === 192 && b === 168) return true; // private
   if (a === 172 && b >= 16 && b <= 31) return true; // private
+  if (a === 100 && b >= 64 && b <= 127) return true; // carrier-grade NAT (RFC 6598)
   return false;
 }
 

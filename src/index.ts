@@ -227,6 +227,8 @@ export const MAX_SKILL_URLS = 5;
 // check_text input cap — bounds regex and hidden-content scan work per call.
 // 1M chars fits any real email or page (GitHub repo page: ~290 KB).
 export const MAX_TEXT_CHARS = 1_000_000;
+// Real URLs stay far below this; it stops a multi-megabyte "URL" from reaching the resolver.
+export const MAX_URL_CHARS = 8192;
 
 // Findings quote the untrusted skill back into the caller's model context, so
 // the list returned is capped: a skill built to match on every line can't flood
@@ -318,7 +320,7 @@ function createServer(env: Env): McpServer {
       title: "Check a link",
       annotations: READ_ONLY_TOOL,
       inputSchema: {
-        url: z.string().describe("The http(s) URL to inspect"),
+        url: z.string().max(MAX_URL_CHARS).describe("The http(s) URL to inspect"),
         compact: z.boolean().optional().describe("Return only verdict/reason/resolvedUrl/degraded instead of the full evidence trail"),
       },
     },
@@ -527,6 +529,9 @@ export default {
       }
       if (typeof body.url !== "string" || body.url === "") {
         return Response.json({ error: "missing 'url' string in body" }, { status: 400 });
+      }
+      if (body.url.length > MAX_URL_CHARS) {
+        return Response.json({ error: `url longer than ${MAX_URL_CHARS} characters` }, { status: 400 });
       }
       try {
         const result = await checkOneUrl(body.url, env);

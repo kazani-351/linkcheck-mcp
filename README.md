@@ -22,6 +22,10 @@ Verdicts are a best-effort signal, not a guarantee. A `SAFE` link can still turn
 
 **Privacy:** linkcheck doesn't save the links you check. To check one, it looks up the hostname with Cloudflare's DNS service and requests headers from the link's servers, with a user agent that names this project. Self-hosted instances with a VirusTotal key also send owner-checked links to VirusTotal.
 
+**Known limits:**
+- Checking a link means requesting it. A few sites treat any request to a one-click link (an unsubscribe link, a magic sign-in link) as a click, so check those with care.
+- Only redirects that come back as HTTP headers are followed. Redirects done with JavaScript or a `<meta refresh>` inside the page are not seen, because the page is never loaded.
+
 ## Connect in 30 seconds
 
 The public instance is free and needs no account or key.
