@@ -122,10 +122,24 @@ test("/.well-known/mcp/server-card.json returns the card, no auth", async () => 
   const res = await worker.fetch(new Request("http://localhost/.well-known/mcp/server-card.json"), ENV, ctx);
   assert.equal(res.status, 200);
   assert.match(res.headers.get("content-type") ?? "", /application\/json/);
-  const card = await res.json() as { name: string; tools: unknown[]; authentication: { type: string } };
+  const card = await res.json() as { name: string; tools: Array<{ name: string }>; authentication: { type: string } };
   assert.equal(card.name, "linkcheck-mcp");
-  assert.equal(card.tools.length, 2);
+  assert.deepEqual(card.tools.map((t) => t.name), ["check_url", "check_text", "check_skill"]);
   assert.equal(card.authentication.type, "none");
+});
+
+test("brand assets are public: SVG favicon and real PNG bytes", async () => {
+  const svg = await worker.fetch(new Request("http://localhost/favicon.svg"), ENV, ctx);
+  assert.equal(svg.status, 200);
+  assert.equal(svg.headers.get("content-type"), "image/svg+xml");
+  assert.match(await svg.text(), /^<svg /);
+  for (const path of ["/og.png", "/apple-touch-icon.png", "/icon-256.png", "/favicon.ico"]) {
+    const res = await worker.fetch(new Request(`http://localhost${path}`), ENV, ctx);
+    assert.equal(res.status, 200, path);
+    assert.equal(res.headers.get("content-type"), "image/png", path);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    assert.deepEqual([...bytes.slice(0, 4)], [0x89, 0x50, 0x4e, 0x47], path); // PNG signature
+  }
 });
 
 test("/health returns ok without auth", async () => {

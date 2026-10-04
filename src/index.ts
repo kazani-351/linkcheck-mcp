@@ -20,7 +20,29 @@ import {
 import { computeVerdict, type Verdict } from "./scorer.ts";
 import { checkVirusTotal } from "./virustotal.ts";
 import { refreshAllFeeds } from "./refresh.ts";
-import { LANDING_HTML, SERVER_CARD_JSON, LINK_HEADER } from "./landing.ts";
+import { landingHtml, SERVER_CARD_JSON, LINK_HEADER, PROD_ORIGIN } from "./landing.ts";
+import { LOGO_SVG, MARK_SVG, OG_PNG_B64, APPLE_ICON_PNG_B64, ICON_256_PNG_B64 } from "./brand-assets.ts";
+
+const LANDING_HTML = landingHtml(MARK_SVG.replace("<svg ", '<svg aria-hidden="true" '));
+
+// Public brand assets. PNGs are base64 in the bundle (brand/build.py) and
+// decoded on first request, not at isolate start-up.
+const PNG_ASSETS: Record<string, string> = {
+  "/og.png": OG_PNG_B64,
+  "/apple-touch-icon.png": APPLE_ICON_PNG_B64,
+  "/icon-256.png": ICON_256_PNG_B64,
+  "/favicon.ico": ICON_256_PNG_B64, // browsers accept a PNG body here
+};
+const decodedPngs = new Map<string, Uint8Array>();
+function pngBytes(path: string): Uint8Array {
+  let bytes = decodedPngs.get(path);
+  if (!bytes) {
+    bytes = Uint8Array.from(atob(PNG_ASSETS[path]), (c) => c.charCodeAt(0));
+    decodedPngs.set(path, bytes);
+  }
+  return bytes;
+}
+const ASSET_CACHE = "public, max-age=86400";
 import { scanSkill, type SkillFile, type SkillVerdict } from "./skillscan.ts";
 import { surfaceHidden } from "./hidden.ts";
 import { parseGithubUrl, fetchSkillFromGithub, type GithubFetch } from "./github.ts";
@@ -251,7 +273,17 @@ export async function runCheckSkill(
 }
 
 function createServer(env: Env): McpServer {
-  const server = new McpServer({ name: "linkcheck-mcp", version: "0.1.0" });
+  const server = new McpServer({
+    name: "linkcheck-mcp",
+    title: "linkcheck",
+    version: "0.1.0",
+    // SEP-973 server icons. Claude's custom-connector UI ignores these today
+    // (anthropics/claude-ai-mcp#152); other clients render them.
+    icons: [
+      { src: `${PROD_ORIGIN}/icon-256.png`, mimeType: "image/png", sizes: ["256x256"] },
+      { src: `${PROD_ORIGIN}/favicon.svg`, mimeType: "image/svg+xml", sizes: ["any"] },
+    ],
+  });
 
   server.registerTool(
     "check_url",
@@ -408,6 +440,13 @@ export default {
       return new Response(LANDING_HTML, {
         headers: { "content-type": "text/html; charset=utf-8", link: LINK_HEADER },
       });
+    }
+
+    if (request.method === "GET" && (pathname === "/favicon.svg" || pathname === "/logo.svg")) {
+      return new Response(LOGO_SVG, { headers: { "content-type": "image/svg+xml", "cache-control": ASSET_CACHE } });
+    }
+    if (request.method === "GET" && pathname in PNG_ASSETS) {
+      return new Response(pngBytes(pathname), { headers: { "content-type": "image/png", "cache-control": ASSET_CACHE } });
     }
 
     // Machine-readable server card for MCP discovery. Public.
