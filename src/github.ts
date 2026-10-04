@@ -53,7 +53,8 @@ export function parseGithubUrl(input: string): GithubTarget | null {
 
 type Fetcher = typeof fetch;
 
-const API_HEADERS = { "user-agent": "linkcheck-mcp", accept: "application/vnd.github+json" };
+const UA = "linkcheck-mcp/0.1 (+https://linkcheck-mcp.kazani.workers.dev)";
+const API_HEADERS = { "user-agent": UA, accept: "application/vnd.github+json" };
 
 // Subrequest budget: a Worker invocation on the free plan gets ~50 outbound
 // fetches. 2 API calls + GITHUB_MAX_FILES raw fetches + check_skill's URL checks
@@ -125,7 +126,7 @@ export async function fetchSkillFromGithub(target: GithubTarget, doFetch: Fetche
         const raw = await githubFetch(
           doFetch,
           `https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${commit}/${b.path.split("/").map(encodeURIComponent).join("/")}`,
-          { "user-agent": "linkcheck-mcp" },
+          { "user-agent": UA },
         );
         if (!raw.ok) {
           results[i] = `fetch failed (${raw.status}): ${rel}`;

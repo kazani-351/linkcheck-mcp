@@ -605,3 +605,32 @@ test("POST /admin/refresh-feeds from a non-owner on the authless public instance
     assert.equal(res.status, 403);
   }
 });
+
+// --- pre-public hardening ---
+
+test("tools advertise read-only annotations and titles", async () => {
+  const res = await worker.fetch(mcpReq({ jsonrpc: "2.0", id: 90, method: "tools/list" }, "test-secret"), ENV, ctx);
+  const text = await res.text();
+  const body = JSON.parse(text.includes("data:") ? text.split("data:").pop()!.trim() : text);
+  const tools = body.result.tools as Array<{ name: string; title?: string; annotations?: Record<string, boolean> }>;
+  assert.equal(tools.length, 3);
+  for (const t of tools) {
+    assert.ok(t.title, t.name);
+    assert.equal(t.annotations?.readOnlyHint, true, t.name);
+    assert.equal(t.annotations?.destructiveHint, false, t.name);
+  }
+});
+
+test("landing page sends a CSP that still allows its own script and /check", async () => {
+  const res = await worker.fetch(new Request("http://localhost/", { headers: { accept: "text/html" } }), ENV, ctx);
+  const csp = res.headers.get("content-security-policy") ?? "";
+  assert.match(csp, /connect-src 'self'/);
+  assert.match(csp, /frame-ancestors 'none'/);
+  assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+});
+
+test("owner token must match exactly: prefix, longer, and empty tokens are rejected", async () => {
+  for (const auth of ["Bearer owner-secre", "Bearer owner-secretX", "Bearer ", "owner-secret"]) {
+    assert.equal((await publicCheck("/check", { authorization: auth })).virusTotalChecked, false, auth);
+  }
+});

@@ -98,7 +98,7 @@ async function probe(
     method,
     redirect: "manual",
     signal: AbortSignal.timeout(HOP_TIMEOUT_MS),
-    headers: { "user-agent": "linkcheck-mcp/0.1 (+safe-resolver; HEAD-first)" },
+    headers: { "user-agent": "linkcheck-mcp/0.1 (+https://linkcheck-mcp.kazani.workers.dev; link safety check, HEAD-first)" },
   });
   const location = res.headers.get("location");
   // Never download/execute the body (SPEC §11). Cancel any GET stream.

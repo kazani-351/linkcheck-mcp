@@ -193,7 +193,7 @@ export function landingHtml(markSvg: string): string {
         <button type="button" data-u="http://example.com">plain http</button>
       </div>
       <div class="result" id="out" hidden aria-live="polite"></div>
-      <p class="fine">Nothing is opened or rendered: only redirect headers are read. Public checks use six threat feeds and the structural checks; VirusTotal is reserved for the maintainer's own key.</p>
+      <p class="fine">The page is never rendered: linkcheck only reads redirect headers. Links you check are not stored. Public checks use the six feeds and the structural checks; VirusTotal is reserved for the maintainer's own key. Verdicts are a best-effort signal, not a guarantee: a SAFE link can still turn out to be bad.</p>
     </section>
 
     <h2>How it decides</h2>
@@ -201,7 +201,7 @@ export function landingHtml(markSvg: string): string {
       <li><span><b>Follow the redirects.</b> HEAD requests only, so the page never loads and nothing runs. Shorteners and redirect chains are unwound to the real destination.</span></li>
       <li><span><b>Clean it.</b> Tracking parameters like <code>utm_*</code> and <code>fbclid</code> are stripped and listed.</span></li>
       <li><span><b>Inspect the shape.</b> Lookalike characters, <code>@</code> tricks, raw IP hosts, and abused domain endings.</span></li>
-      <li><span><b>Check the feeds.</b> URLhaus plus five HaGeZi threat lists, refreshed daily. If any check can't finish, the verdict can only get stricter, never SAFE.</span></li>
+      <li><span><b>Check the feeds.</b> URLhaus plus five HaGeZi lists (threat intel, newly registered domains, shorteners, abused domain endings), refreshed daily. If any check can't finish, the verdict can only get stricter, never SAFE.</span></li>
     </ol>
 
     <h2 id="connect">Connect it to your agent</h2>

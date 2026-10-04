@@ -1,5 +1,6 @@
-// Tracker/param stripping via the ClearURLs ruleset (SPEC §4, §6). Bundled snapshot
-// at build time; cron-refreshed into D1 in production (see SPEC §6, §15).
+// Tracker/param stripping via the ClearURLs ruleset (SPEC §4, §6). A bundled
+// snapshot (src/data/clearurls-rules.json, LGPL-3.0, see src/data/NOTICE.md),
+// updated by hand; it is not part of the daily feed refresh.
 //
 // Scope (v1): applies `rules` + `referralMarketing` (param-name regexes) and
 // `exceptions` (skip a provider's rules if the URL matches). Deliberately NOT

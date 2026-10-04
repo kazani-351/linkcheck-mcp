@@ -14,9 +14,13 @@ Give linkcheck a link and it:
 1. **Follows the redirects** with HEAD requests only, so the page never loads and nothing runs.
 2. **Strips trackers** like `utm_*` and `fbclid`, and lists what it removed.
 3. **Inspects the shape** for phishing tricks: lookalike characters, `@` tricks, raw IP hosts, abused domain endings.
-4. **Checks the destination** against URLhaus and five HaGeZi threat lists, refreshed daily.
+4. **Checks the destination** against URLhaus and five HaGeZi lists (threat intel, newly registered domains, shorteners, abused domain endings), refreshed daily.
 
 Then it returns `SAFE`, `SUSPICIOUS` or `DANGEROUS` with the evidence. If any check can't finish, the verdict can only get stricter. It never falls back to `SAFE`.
+
+Verdicts are a best-effort signal, not a guarantee. A `SAFE` link can still turn out to be malicious, and a `SUSPICIOUS` one can be fine. Use it as one input, not the final word.
+
+**Privacy:** linkcheck does not store the links you check. To resolve a link, it sends HEAD requests to that link's servers from Cloudflare, with a user agent that names this project.
 
 ## Connect in 30 seconds
 
