@@ -32,6 +32,10 @@ import { parseGithubUrl, fetchSkillFromGithub, type GithubFetch } from "./github
 // type safety.
 interface Env {
   MCP_BEARER_TOKEN?: string;
+  // Owner-only privileges on the public instance: VirusTotal lookups (a free
+  // personal key, 500/day, personal-use ToS) and /admin/refresh-feeds. Fails
+  // closed — unset means nobody gets either.
+  OWNER_TOKEN?: string;
   FEEDS_DB?: WritableD1;
   VERDICT_CACHE?: WritableKV;
   VIRUSTOTAL_API_KEY?: string;
@@ -95,8 +99,10 @@ async function checkOneUrl(url: string, env: Env, useVirusTotal = true) {
     degraded.push("feed lookups skipped: D1/KV bindings not configured");
   }
 
+  let virusTotalChecked: boolean | undefined;
   if (useVirusTotal) {
     const vt = await checkVirusTotal(resolved.finalUrl, env.VIRUSTOTAL_API_KEY);
+    virusTotalChecked = vt.checked;
     if (vt.degraded) degraded.push(vt.degraded);
     if (vt.malicious > 0) feedSignals.push({ matchedValue: String(vt.malicious), source: "VirusTotal", type: "virustotal_malicious" });
     else if (vt.suspicious > 0) feedSignals.push({ matchedValue: String(vt.suspicious), source: "VirusTotal", type: "virustotal_suspicious" });
@@ -123,6 +129,9 @@ async function checkOneUrl(url: string, env: Env, useVirusTotal = true) {
     feedSignals,
     isShortener,
     resolvedIp,
+    // false for public callers (VT is owner-only) — reported here, not in
+    // degraded, because any degraded entry forces the verdict to SUSPICIOUS.
+    virusTotalChecked,
   };
 }
 
@@ -386,7 +395,8 @@ async function readFeedMeta(env: Env): Promise<unknown> {
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const { pathname } = new URL(request.url);
+    const reqUrl = new URL(request.url);
+    const { pathname } = reqUrl;
 
     // Human landing page — served only for browser (text/html) GETs on "/", so
     // it never shadows the MCP transport, which POSTs (and negotiates SSE via
@@ -423,6 +433,14 @@ export default {
       return new Response("unauthorized", { status: 401 });
     }
 
+    // Owner = OWNER_TOKEN as a bearer (the local hook) or as ?key= (the claude.ai
+    // connector, which can't send a plain bearer header). Everyone else gets the
+    // same checks minus VirusTotal.
+    const owner = env.OWNER_TOKEN;
+    const isOwner =
+      !!owner && (request.headers.get("authorization") === `Bearer ${owner}` || reqUrl.searchParams.get("key") === owner);
+    if (!isOwner) env = { ...env, VIRUSTOTAL_API_KEY: undefined };
+
     // Plain-HTTP verdict endpoint — lets a non-MCP client (the local
     // UserPromptSubmit hook in ~/.claude/hooks) get a verdict with a single
     // curl, reusing the EXACT same checkOneUrl path as the MCP check_url tool.
@@ -452,6 +470,7 @@ export default {
     // also how the refresh logic gets verified against production. Doubles as a
     // genuine "force refresh now" if a feed goes stale before the next schedule.
     if (pathname === "/admin/refresh-feeds" && request.method === "POST") {
+      if (!isOwner) return new Response("forbidden", { status: 403 });
       if (!env.FEEDS_DB || !env.VERDICT_CACHE) {
         return Response.json({ error: "D1/KV bindings not configured" }, { status: 503 });
       }
