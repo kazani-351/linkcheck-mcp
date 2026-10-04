@@ -3,9 +3,10 @@
 // Both are public — no bearer gate — so agents and people can discover the
 // server without authenticating. Kept out of index.ts to keep the router lean.
 
+import { VERSION, PROD_ORIGIN, REPO_URL } from "./meta.ts";
+
 export const PROD_ENDPOINT = "https://linkcheck-mcp.kazani.workers.dev/mcp";
-export const PROD_ORIGIN = "https://linkcheck-mcp.kazani.workers.dev";
-export const REPO_URL = "https://github.com/kazani-351/linkcheck-mcp";
+
 
 // A pragmatic MCP "server card": enough for an agent or directory to understand
 // what this server is, where it lives, how it authenticates, and what it exposes.
@@ -13,7 +14,7 @@ export const REPO_URL = "https://github.com/kazani-351/linkcheck-mcp";
 // and the emerging well-known convention publish.)
 export const SERVER_CARD = {
   name: "linkcheck-mcp",
-  version: "0.1.0",
+  version: VERSION,
   description:
     "Resolve a URL's true destination and judge its safety (SAFE/SUSPICIOUS/DANGEROUS) before anyone opens it: redirect resolution, tracker stripping, phishing heuristics, and live threat-intelligence feeds.",
   endpoint: PROD_ENDPOINT,
@@ -193,12 +194,12 @@ export function landingHtml(markSvg: string): string {
         <button type="button" data-u="http://example.com">plain http</button>
       </div>
       <div class="result" id="out" hidden aria-live="polite"></div>
-      <p class="fine">The page is never rendered: linkcheck only reads redirect headers. Links you check are not stored. Public checks use the six feeds and the structural checks; VirusTotal is reserved for the maintainer's own key. Verdicts are a best-effort signal, not a guarantee: a SAFE link can still turn out to be bad.</p>
+      <p class="fine">The page is never rendered: linkcheck only reads response headers. Links you check aren't saved. Public checks use the six feeds and the structural checks; VirusTotal is reserved for the maintainer's own key. Verdicts are a best-effort signal, not a guarantee: a SAFE link can still turn out to be bad.</p>
     </section>
 
     <h2>How it decides</h2>
     <ol class="steps">
-      <li><span><b>Follow the redirects.</b> HEAD requests only, so the page never loads and nothing runs. Shorteners and redirect chains are unwound to the real destination.</span></li>
+      <li><span><b>Follow the redirects.</b> Only the response headers are read (HEAD first, GET with the body discarded if a server refuses HEAD), so the page never loads and nothing runs. Shorteners and redirect chains are unwound to the real destination.</span></li>
       <li><span><b>Clean it.</b> Tracking parameters like <code>utm_*</code> and <code>fbclid</code> are stripped and listed.</span></li>
       <li><span><b>Inspect the shape.</b> Lookalike characters, <code>@</code> tricks, raw IP hosts, and abused domain endings.</span></li>
       <li><span><b>Check the feeds.</b> URLhaus plus five HaGeZi lists (threat intel, newly registered domains, shorteners, abused domain endings), refreshed daily. If any check can't finish, the verdict can only get stricter, never SAFE.</span></li>

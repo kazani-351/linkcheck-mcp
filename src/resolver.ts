@@ -1,6 +1,7 @@
 // Redirect resolver — the risky core (SPEC §9, §11). HEAD-first, GET-headers-only
 // fallback, hop-capped, per-hop timeout, loop detection, lightweight SSRF guard.
 // Runs in both Node (undici fetch) and the Workers runtime — no platform APIs used.
+import { USER_AGENT } from "./meta.ts";
 
 export interface Hop {
   url: string;
@@ -98,7 +99,7 @@ async function probe(
     method,
     redirect: "manual",
     signal: AbortSignal.timeout(HOP_TIMEOUT_MS),
-    headers: { "user-agent": "linkcheck-mcp/0.1 (+https://linkcheck-mcp.kazani.workers.dev; link safety check, HEAD-first)" },
+    headers: { "user-agent": USER_AGENT },
   });
   const location = res.headers.get("location");
   // Never download/execute the body (SPEC §11). Cancel any GET stream.

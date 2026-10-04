@@ -325,7 +325,7 @@ Shortlist: `linkcheck-mcp` · `unfurl` · `saferesolve` · `urlens` (reuses a pa
 - ~~**HaGeZi/URLhaus/ClearURLs commercial terms** for the public phase — must be resolved before going public (hard gate, §15).~~ **RESOLVED 2026-10-04:** ClearURLs rules (LGPL-3.0) are the only vendored data; kept under their own license with `src/data/NOTICE.md`. HaGeZi (GPL-3.0) is downloaded at runtime, not redistributed. URLhaus: abuse.ch terms allow free, fair-use, non-commercial volumes; one daily download. Repo code: MIT.
 - ~~**Entropy-NRD/DGA subset size** vs D1 write ceiling~~ — **RESOLVED (§6, §20):** real sizes forced the KV-blob pivot for all three large feeds; no longer a D1 concern.
 - ~~**Cron diff-refresh for the Tier-2 KV blobs**~~ — **RESOLVED:** built as full-overwrite (no diff needed, confirmed simpler as predicted). `refresh.ts`, live and verified against production.
-- **VirusTotal rate-limit strategy** under any future shared use (fine for personal; unspecified for public).
+- ~~**VirusTotal rate-limit strategy** under any future shared use (fine for personal; unspecified for public).~~ **RESOLVED 2026-10-04:** VT is owner-only (OWNER_TOKEN); public callers get `virusTotalChecked: false`.
 - **Cron cadence tuning** — daily assumed; may tighten if feeds update faster and budget allows.
 - **RDAP necessity** — only revisited if NRD proves too coarse in practice.
 
