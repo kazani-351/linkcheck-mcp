@@ -10,5 +10,5 @@ MCP_BEARER_TOKEN="change-me-to-an-unguessable-token"
 VIRUSTOTAL_API_KEY=""
 
 # Unlocks VirusTotal and /admin/refresh-feeds for requests that send it as
-# `Authorization: Bearer <token>` or `?key=<token>`. Unset = nobody gets either.
+# `Authorization: Bearer <token>`. Unset = nobody gets either.
 OWNER_TOKEN=""

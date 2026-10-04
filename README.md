@@ -62,7 +62,7 @@ npm run typecheck # tsc --noEmit
    ```
    The reference deployment currently runs **without** this set — Claude's native "Add custom connector" UI only supports OAuth or `static_headers` (beta, not yet exposed there) for remote MCP servers, not a plain bearer header, so connecting via that UI meant dropping the gate rather than standing up a full OAuth server (see SPEC §11 for the reasoning and the reversal path). If you connect via `mcp-remote` (below) instead, you can keep the token.
 
-   Optional: `npx wrangler secret put VIRUSTOTAL_API_KEY` for VT-augmented checks, plus `npx wrangler secret put OWNER_TOKEN`. VirusTotal runs **only for the owner**: requests carrying `Authorization: Bearer <OWNER_TOKEN>` or `?key=<OWNER_TOKEN>` (for connector UIs that can't send headers, e.g. `https://<your-worker>.workers.dev/mcp?key=<OWNER_TOKEN>`). Everyone else gets the same checks without VT, and the full result shows `"virusTotalChecked": false`. Without `OWNER_TOKEN`, nobody gets VT and `/admin/refresh-feeds` is refused.
+   Optional: `npx wrangler secret put VIRUSTOTAL_API_KEY` for VT-augmented checks, plus `npx wrangler secret put OWNER_TOKEN`. VirusTotal runs **only for the owner**: requests carrying `Authorization: Bearer <OWNER_TOKEN>` (in Claude's Add custom connector dialog: No sign-in, then a request header `authorization` = `Bearer <OWNER_TOKEN>`). Everyone else gets the same checks without VT, and the full result shows `"virusTotalChecked": false`. Without `OWNER_TOKEN`, nobody gets VT and `/admin/refresh-feeds` is refused.
 4. Deploy:
    ```bash
    npx wrangler deploy

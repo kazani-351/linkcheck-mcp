@@ -569,9 +569,9 @@ test("public caller: VirusTotal is skipped even though a key is configured", asy
   assert.equal((await publicCheck("/check?key=wrong")).virusTotalChecked, false);
 });
 
-test("owner via bearer or ?key= gets VirusTotal", async () => {
+test("owner bearer gets VirusTotal; the token in a query param does not", async () => {
   assert.equal((await publicCheck("/check", { authorization: "Bearer owner-secret" })).virusTotalChecked, true);
-  assert.equal((await publicCheck("/check?key=owner-secret")).virusTotalChecked, true);
+  assert.equal((await publicCheck("/check?key=owner-secret")).virusTotalChecked, false);
 });
 
 test("no OWNER_TOKEN configured -> nobody gets VirusTotal (fails closed)", async () => {

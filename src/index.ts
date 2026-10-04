@@ -395,8 +395,7 @@ async function readFeedMeta(env: Env): Promise<unknown> {
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const reqUrl = new URL(request.url);
-    const { pathname } = reqUrl;
+    const { pathname } = new URL(request.url);
 
     // Human landing page — served only for browser (text/html) GETs on "/", so
     // it never shadows the MCP transport, which POSTs (and negotiates SSE via
@@ -433,12 +432,10 @@ export default {
       return new Response("unauthorized", { status: 401 });
     }
 
-    // Owner = OWNER_TOKEN as a bearer (the local hook) or as ?key= (the claude.ai
-    // connector, which can't send a plain bearer header). Everyone else gets the
-    // same checks minus VirusTotal.
+    // Owner = OWNER_TOKEN as a bearer header (the local hook, and the claude.ai
+    // connector's request header). Everyone else gets the same checks minus VirusTotal.
     const owner = env.OWNER_TOKEN;
-    const isOwner =
-      !!owner && (request.headers.get("authorization") === `Bearer ${owner}` || reqUrl.searchParams.get("key") === owner);
+    const isOwner = !!owner && request.headers.get("authorization") === `Bearer ${owner}`;
     if (!isOwner) env = { ...env, VIRUSTOTAL_API_KEY: undefined };
 
     // Plain-HTTP verdict endpoint — lets a non-MCP client (the local
