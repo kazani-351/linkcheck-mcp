@@ -11,12 +11,20 @@ A free MCP server that lets an AI agent check a link before it opens, follows, o
 
 Give linkcheck a link and it:
 
-1. **Follows the redirects** with HEAD requests only, so the page never loads and nothing runs.
+1. **Follows the redirects** reading only response headers (HEAD first; GET with the body discarded if a server refuses HEAD), so the page never loads and nothing runs.
 2. **Strips trackers** like `utm_*` and `fbclid`, and lists what it removed.
 3. **Inspects the shape** for phishing tricks: lookalike characters, `@` tricks, raw IP hosts, abused domain endings.
-4. **Checks the destination** against URLhaus and five HaGeZi threat lists, refreshed daily.
+4. **Checks the destination** against URLhaus and five HaGeZi lists (threat intel, newly registered domains, shorteners, abused domain endings), refreshed daily.
 
 Then it returns `SAFE`, `SUSPICIOUS` or `DANGEROUS` with the evidence. If any check can't finish, the verdict can only get stricter. It never falls back to `SAFE`.
+
+Verdicts are a best-effort signal, not a guarantee. A `SAFE` link can still turn out to be malicious, and a `SUSPICIOUS` one can be fine. Use it as one input, not the final word.
+
+**Privacy:** linkcheck doesn't save the links you check. To check one, it looks up the hostname with Cloudflare's DNS service and requests headers from the link's servers, with a user agent that names this project. Self-hosted instances with a VirusTotal key also send owner-checked links to VirusTotal.
+
+**Known limits:**
+- Checking a link means requesting it. A few sites treat any request to a one-click link (an unsubscribe link, a magic sign-in link) as a click, so check those with care.
+- Only redirects that come back as HTTP headers are followed. Redirects done with JavaScript or a `<meta refresh>` inside the page are not seen, because the page is never loaded.
 
 ## Connect in 30 seconds
 
@@ -89,7 +97,7 @@ npm run typecheck # tsc --noEmit
 3. **Secrets (optional):**
    - `npx wrangler secret put VIRUSTOTAL_API_KEY` adds VirusTotal lookups.
    - `npx wrangler secret put OWNER_TOKEN` decides who gets them. VirusTotal runs **only for the owner**: requests carrying `Authorization: Bearer <OWNER_TOKEN>` (in Claude's Add custom connector dialog: No sign-in, then a request header `authorization` = `Bearer <OWNER_TOKEN>`). Everyone else gets the same checks without VT, and the full result shows `"virusTotalChecked": false`. Without `OWNER_TOKEN`, nobody gets VT and `/admin/refresh-feeds` is refused.
-   - `npx wrangler secret put MCP_BEARER_TOKEN` locks the whole server to one token, for a private instance. The public instance leaves it unset.
+   - `npx wrangler secret put MCP_BEARER_TOKEN` locks the whole server to one token, for a private instance. The public instance leaves it unset. The owner token still passes this lock, but the landing page Try-it box (which sends no token) stops working.
 4. Deploy:
    ```bash
    npx wrangler deploy

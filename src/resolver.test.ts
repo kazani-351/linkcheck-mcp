@@ -46,3 +46,12 @@ test("hasCrossDomainHop: false for same-registrable-domain subdomain moves (logi
 test("hasCrossDomainHop: single-URL chain (no redirect) is never a cross-domain hop", () => {
   assert.equal(hasCrossDomainHop(["https://example.com/"]), false);
 });
+
+test("isPrivateHost: IPv4-mapped, link-local and unspecified IPv6, and CGNAT are private; public stays public", () => {
+  for (const u of ["http://[::ffff:127.0.0.1]/", "http://[::ffff:169.254.169.254]/", "http://[fe80::1]/", "http://[::]/", "http://100.64.0.1/"]) {
+    assert.equal(isPrivateHost(new URL(u).hostname), true, u);
+  }
+  for (const u of ["http://[2606:4700::1]/", "http://[::ffff:8.8.8.8]/", "http://fdic.gov/", "http://100.128.0.1/"]) {
+    assert.equal(isPrivateHost(new URL(u).hostname), false, u);
+  }
+});

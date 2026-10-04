@@ -1,7 +1,17 @@
 {
   "name": "linkcheck-mcp",
   "version": "0.1.0",
+  "description": "MCP server that checks where a link actually goes and whether it's safe, before an AI agent opens it.",
+  "homepage": "https://linkcheck-mcp.kazani.workers.dev/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kazani-351/linkcheck-mcp.git"
+  },
+  "license": "MIT",
   "private": true,
+  "engines": {
+    "node": ">=22.18"
+  },
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
@@ -19,6 +29,5 @@
     "@types/node": "^26.2.0",
     "typescript": "^7.0.2",
     "wrangler": "^4.122.0"
-  },
-  "license": "MIT"
+  }
 }

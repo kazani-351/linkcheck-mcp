@@ -7,6 +7,7 @@
 // raw.githubusercontent.com) and never executed — not an arbitrary target URL,
 // which stays HEAD-only per the §11 posture.
 
+import { USER_AGENT } from "./meta.ts";
 import { MAX_FILE_BYTES, MAX_TOTAL_BYTES, type SkillFile } from "./skillscan.ts";
 
 export interface GithubTarget {
@@ -53,7 +54,7 @@ export function parseGithubUrl(input: string): GithubTarget | null {
 
 type Fetcher = typeof fetch;
 
-const API_HEADERS = { "user-agent": "linkcheck-mcp", accept: "application/vnd.github+json" };
+const API_HEADERS = { "user-agent": USER_AGENT, accept: "application/vnd.github+json" };
 
 // Subrequest budget: a Worker invocation on the free plan gets ~50 outbound
 // fetches. 2 API calls + GITHUB_MAX_FILES raw fetches + check_skill's URL checks
@@ -125,7 +126,7 @@ export async function fetchSkillFromGithub(target: GithubTarget, doFetch: Fetche
         const raw = await githubFetch(
           doFetch,
           `https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${commit}/${b.path.split("/").map(encodeURIComponent).join("/")}`,
-          { "user-agent": "linkcheck-mcp" },
+          { "user-agent": USER_AGENT },
         );
         if (!raw.ok) {
           results[i] = `fetch failed (${raw.status}): ${rel}`;
