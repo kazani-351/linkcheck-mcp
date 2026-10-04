@@ -103,7 +103,7 @@ export const LANDING_HTML = `<!doctype html>
   </div>
 
   <h2>What it does</h2>
-  <p>A remote <a href="https://modelcontextprotocol.io">MCP</a> server. Give it a link and it follows the redirects (HEAD-first, no page render), strips tracking parameters, inspects the structure for phishing tricks (homographs, <code>@</code>-authority, IP-literal hosts), and checks the destination against six live threat-intelligence feeds plus VirusTotal — then returns a tiered verdict with the evidence behind it.</p>
+  <p>A remote <a href="https://modelcontextprotocol.io">MCP</a> server. Give it a link and it follows the redirects (HEAD-first, no page render), strips tracking parameters, inspects the structure for phishing tricks (homographs, <code>@</code>-authority, IP-literal hosts), and checks the destination against six live threat-intelligence feeds — then returns a tiered verdict with the evidence behind it.</p>
   <p class="verdicts"><b class="safe">SAFE</b> · <b class="warn">SUSPICIOUS</b> · <b class="danger">DANGEROUS</b></p>
 
   <h2>Tools</h2>
@@ -132,7 +132,7 @@ export const LANDING_HTML = `<!doctype html>
       <a href="/.well-known/mcp/server-card.json">server-card.json</a>
       <a href="https://modelcontextprotocol.io">About MCP</a>
     </div>
-    Built by <a href="https://kazani.pages.dev">kazani</a>. Threat intel from HaGeZi, URLhaus (abuse.ch), and VirusTotal.
+    Built by <a href="https://kazani.pages.dev">kazani</a>. Threat intel from HaGeZi and URLhaus (abuse.ch).
   </footer>
 </main>
 </body>

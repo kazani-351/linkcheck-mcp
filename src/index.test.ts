@@ -7,7 +7,7 @@ import worker from "./index.ts";
 import { _resetBlobCacheForTests } from "./feeds.ts";
 
 const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
-const ENV = { MCP_BEARER_TOKEN: "test-secret" };
+const ENV = { MCP_BEARER_TOKEN: "test-secret", OWNER_TOKEN: "test-secret" };
 const VT_KEY = process.env.VT_TEST_KEY; // live-gated, see virustotal.test.ts
 
 // Fake D1/KV — verifies the WIRING in index.ts (feed hits actually reach the
@@ -17,6 +17,7 @@ const VT_KEY = process.env.VT_TEST_KEY; // live-gated, see virustotal.test.ts
 function fakeEnv() {
   return {
     MCP_BEARER_TOKEN: "test-secret",
+    OWNER_TOKEN: "test-secret",
     FEEDS_DB: {
       prepare(sql: string) {
         return {
@@ -539,4 +540,54 @@ test("check_text: a URL whose check throws counts as SUSPICIOUS in worstVerdict,
   const payload = JSON.parse(JSON.parse((await res.text()).split("data: ")[1]).result.content[0].text);
   assert.ok(payload.checked[0].error, "expected the check to have errored");
   assert.equal(payload.worstVerdict, "SUSPICIOUS");
+});
+
+// --- owner-only VirusTotal + admin (public instance runs without MCP_BEARER_TOKEN) ---
+
+const VT_200 = JSON.stringify({ data: { attributes: { last_analysis_stats: { malicious: 0, suspicious: 0 } } } });
+const PUBLIC_ENV = { OWNER_TOKEN: "owner-secret", VIRUSTOTAL_API_KEY: "vt-key" };
+
+async function publicCheck(path: string, headers: Record<string, string> = {}) {
+  const res = await withFakeFetch(VT_200, () =>
+    worker.fetch(
+      new Request(`http://localhost${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body: JSON.stringify({ url: "https://example.org/" }),
+      }),
+      PUBLIC_ENV,
+      ctx,
+    ),
+  );
+  assert.equal(res.status, 200);
+  return (await res.json()) as { virusTotalChecked?: boolean };
+}
+
+test("public caller: VirusTotal is skipped even though a key is configured", async () => {
+  assert.equal((await publicCheck("/check")).virusTotalChecked, false);
+  assert.equal((await publicCheck("/check", { authorization: "Bearer wrong" })).virusTotalChecked, false);
+  assert.equal((await publicCheck("/check?key=wrong")).virusTotalChecked, false);
+});
+
+test("owner bearer gets VirusTotal; the token in a query param does not", async () => {
+  assert.equal((await publicCheck("/check", { authorization: "Bearer owner-secret" })).virusTotalChecked, true);
+  assert.equal((await publicCheck("/check?key=owner-secret")).virusTotalChecked, false);
+});
+
+test("no OWNER_TOKEN configured -> nobody gets VirusTotal (fails closed)", async () => {
+  const res = await withFakeFetch(VT_200, () =>
+    worker.fetch(
+      new Request("http://localhost/check", { method: "POST", body: JSON.stringify({ url: "https://example.org/" }) }),
+      { VIRUSTOTAL_API_KEY: "vt-key" },
+      ctx,
+    ),
+  );
+  assert.equal(((await res.json()) as { virusTotalChecked?: boolean }).virusTotalChecked, false);
+});
+
+test("POST /admin/refresh-feeds from a non-owner on the authless public instance -> 403", async () => {
+  for (const env of [PUBLIC_ENV, {}]) {
+    const res = await worker.fetch(new Request("http://localhost/admin/refresh-feeds", { method: "POST" }), env, ctx);
+    assert.equal(res.status, 403);
+  }
 });

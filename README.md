@@ -62,7 +62,7 @@ npm run typecheck # tsc --noEmit
    ```
    The reference deployment currently runs **without** this set — Claude's native "Add custom connector" UI only supports OAuth or `static_headers` (beta, not yet exposed there) for remote MCP servers, not a plain bearer header, so connecting via that UI meant dropping the gate rather than standing up a full OAuth server (see SPEC §11 for the reasoning and the reversal path). If you connect via `mcp-remote` (below) instead, you can keep the token.
 
-   Optional: `npx wrangler secret put VIRUSTOTAL_API_KEY` for VT-augmented checks (degrades cleanly if unset).
+   Optional: `npx wrangler secret put VIRUSTOTAL_API_KEY` for VT-augmented checks, plus `npx wrangler secret put OWNER_TOKEN`. VirusTotal runs **only for the owner**: requests carrying `Authorization: Bearer <OWNER_TOKEN>` (in Claude's Add custom connector dialog: No sign-in, then a request header `authorization` = `Bearer <OWNER_TOKEN>`). Everyone else gets the same checks without VT, and the full result shows `"virusTotalChecked": false`. Without `OWNER_TOKEN`, nobody gets VT and `/admin/refresh-feeds` is refused.
 4. Deploy:
    ```bash
    npx wrangler deploy
@@ -98,7 +98,7 @@ Either way, install `skills/check-url-safety.md` to `~/.claude/skills/check-url-
 - Threat intel: [HaGeZi dns-blocklists](https://github.com/hagezi/dns-blocklists) (TIF, Entropy-NRD/DGA, Abused-TLDs, TIF-IPs, URL-Shortener), [URLhaus](https://urlhaus.abuse.ch/) (abuse.ch).
 - Tracker rules: [ClearURLs](https://docs.clearurls.xyz/) catalog.
 - Design inspiration: [URLCheck](https://github.com/TrianguloY/URLCheck) (CC BY 4.0).
-- Optional: [VirusTotal](https://www.virustotal.com/) — active when `VIRUSTOTAL_API_KEY` is set; degrades cleanly if absent.
+- Optional: [VirusTotal](https://www.virustotal.com/) — active when `VIRUSTOTAL_API_KEY` is set, for owner requests only (see `OWNER_TOKEN` above); degrades cleanly if absent.
 
 Commercial/redistribution terms of each source must be verified before any public/commercial use (see SPEC.md §15, §18).
 
