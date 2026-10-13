@@ -45,6 +45,23 @@ export const SERVER_CARD = {
 
 export const SERVER_CARD_JSON = JSON.stringify(SERVER_CARD, null, 2);
 
+// llms.txt (llmstxt.org): a Markdown map of the site for LLMs. Built from the
+// server card so the tool list can't drift from what the server exposes.
+export const LLMS_TXT = `# linkcheck
+
+> ${SERVER_CARD.description}
+
+linkcheck is a free remote MCP server (streamable HTTP, no auth). Point an MCP client at ${PROD_ENDPOINT}.
+
+## Tools
+${SERVER_CARD.tools.map((t) => `- ${t.name}: ${t.description}`).join("\n")}
+
+## Links
+- [Homepage](${PROD_ORIGIN}/): what it does, a live try-it box, and setup steps.
+- [Server card](${PROD_ORIGIN}/.well-known/mcp/server-card.json): machine-readable server description.
+- [Source](${REPO_URL}): code, README and known limits.
+`;
+
 // Advertised on the landing page + /health so clients can find the card.
 export const LINK_HEADER =
   '</.well-known/mcp/server-card.json>; rel="service-desc"; type="application/json"';
