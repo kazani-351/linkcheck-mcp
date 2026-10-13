@@ -20,7 +20,7 @@ import {
 import { computeVerdict, type Verdict } from "./scorer.ts";
 import { checkVirusTotal } from "./virustotal.ts";
 import { refreshAllFeeds } from "./refresh.ts";
-import { landingHtml, SERVER_CARD_JSON, LINK_HEADER } from "./landing.ts";
+import { landingHtml, SERVER_CARD_JSON, LINK_HEADER, LLMS_TXT } from "./landing.ts";
 import { VERSION, PROD_ORIGIN } from "./meta.ts";
 import { LOGO_SVG, MARK_SVG, OG_PNG_B64, APPLE_ICON_PNG_B64, ICON_256_PNG_B64 } from "./brand-assets.ts";
 import { scanSkill, type SkillFile, type SkillVerdict } from "./skillscan.ts";
@@ -486,6 +486,12 @@ export default {
     if (pathname === "/.well-known/mcp/server-card.json") {
       return new Response(SERVER_CARD_JSON, {
         headers: { "content-type": "application/json; charset=utf-8" },
+      });
+    }
+
+    if (pathname === "/llms.txt") {
+      return new Response(LLMS_TXT, {
+        headers: { "content-type": "text/plain; charset=utf-8" },
       });
     }
 

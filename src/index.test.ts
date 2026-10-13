@@ -128,6 +128,15 @@ test("/.well-known/mcp/server-card.json returns the card, no auth", async () => 
   assert.equal(card.authentication.type, "none");
 });
 
+test("/llms.txt returns a Markdown map listing every tool, no auth", async () => {
+  const res = await worker.fetch(new Request("http://localhost/llms.txt"), ENV, ctx);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") ?? "", /text\/plain/);
+  const body = await res.text();
+  assert.match(body, /^# linkcheck\n/);
+  for (const t of ["check_url", "check_text", "check_skill"]) assert.match(body, new RegExp(`- ${t}: `));
+});
+
 test("brand assets are public: SVG favicon and real PNG bytes", async () => {
   const svg = await worker.fetch(new Request("http://localhost/favicon.svg"), ENV, ctx);
   assert.equal(svg.status, 200);
