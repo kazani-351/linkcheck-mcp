@@ -25,10 +25,29 @@ export interface FeedSource {
   table?: "feed_domains" | "feed_urls_exact" | "feed_tlds"; // d1 only
   column?: "domain" | "url" | "tld"; // d1 only
   kvKey?: string; // kv only
+  // Keyed sources: the URL holds "{secret}", filled in at fetch time from this
+  // Worker secret. Never inlined here, and scrubbed from every error message,
+  // because feed_meta.last_status is served publicly at /health.
+  secret?: keyof FeedSecrets;
+  format?: "urlhaus-csv-online"; // default: one entry per line
+}
+
+export interface FeedSecrets {
+  URLHAUS_AUTH_KEY?: string;
 }
 
 export const FEED_SOURCES: FeedSource[] = [
-  { name: "URLhaus", url: "https://urlhaus.abuse.ch/downloads/text_online/", kind: "d1", table: "feed_urls_exact", column: "url" },
+  // abuse.ch retired /downloads/ (HTTP 410, 2026-10-24); exports now need a free
+  // Auth-Key. recent.csv = URLs added in the last 30 days; we keep only "online".
+  {
+    name: "URLhaus",
+    url: "https://urlhaus-api.abuse.ch/v2/files/exports/{secret}/recent.csv",
+    kind: "d1",
+    table: "feed_urls_exact",
+    column: "url",
+    secret: "URLHAUS_AUTH_KEY",
+    format: "urlhaus-csv-online",
+  },
   {
     name: "HaGeZi-Shortener",
     url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/urlshortener-onlydomains.txt",
@@ -80,6 +99,54 @@ function parseLines(text: string): string[] {
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith("#"));
+}
+
+/** One CSV record, RFC 4180 quoting ("" = literal quote). URLhaus quotes every field. */
+function parseCsvLine(line: string): string[] {
+  const fields: string[] = [];
+  let cur = "";
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quoted) {
+      if (c === '"' && line[i + 1] === '"') {
+        cur += '"';
+        i++;
+      } else if (c === '"') quoted = false;
+      else cur += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ",") {
+      fields.push(cur);
+      cur = "";
+    } else cur += c;
+  }
+  fields.push(cur);
+  return fields;
+}
+
+const URLHAUS_ROW = /^"(?:[^"]|"")*","(?:[^"]|"")*","((?:[^"]|"")*)","([^"]*)"/;
+
+/** URLhaus export: columns id,dateadded,url,url_status,... — keep url where url_status is "online". */
+export function parseUrlhausOnline(text: string): string[] {
+  // A 200 that isn't the export (auth-error JSON, HTML notice, changed columns)
+  // would parse to zero URLs, and the D1 diff would then DELETE every URLhaus row
+  // while recording "ok" — silent detection loss plus ~95K D1 writes. Throw instead:
+  // feed_meta gets an error row and the existing rows stay.
+  if (!text.includes("# abuse.ch URLhaus")) throw new Error("URLhaus: response is not the abuse.ch export (header missing)");
+  const out: string[] = [];
+  for (const line of text.split("\n")) {
+    const l = line.trim();
+    if (!l || l.startsWith("#")) continue;
+    // Fast path: every URLhaus field is quoted, so one anchored regex pulls
+    // url + url_status without walking 16 MB char by char (1.9 s CPU → see bench).
+    const m = URLHAUS_ROW.exec(l);
+    const f = m ? null : parseCsvLine(l);
+    const url = m ? m[1].replace(/""/g, '"') : f![2];
+    const status = m ? m[2] : f![3];
+    if (status === "online" && url) out.push(url);
+  }
+  if (out.length === 0) throw new Error("URLhaus: export parsed to 0 online URLs; refusing to wipe the feed");
+  return out;
 }
 
 function chunk<T>(items: T[], size: number): T[][] {
@@ -144,11 +211,23 @@ async function refreshKvFeed(db: WritableD1, kv: WritableKV, src: FeedSource, fr
  *  dead upstream must not block the other five, and feed_meta is updated with
  *  an "error" status (not silently skipped) so staleness is visible at /health,
  *  never silently masked as still-fresh (SPEC's fail-loud pattern, §10). */
-export async function refreshAllFeeds(db: WritableD1, kv: WritableKV, now: number, fetchText: FetchFn = defaultFetchFeedText): Promise<RefreshOutcome[]> {
+export async function refreshAllFeeds(
+  db: WritableD1,
+  kv: WritableKV,
+  now: number,
+  fetchText: FetchFn = defaultFetchFeedText,
+  secrets: FeedSecrets = {},
+): Promise<RefreshOutcome[]> {
   const results = await Promise.allSettled(
     FEED_SOURCES.map(async (src): Promise<RefreshOutcome> => {
-      const text = await fetchText(src.url);
-      const lines = parseLines(text);
+      let url = src.url;
+      if (src.secret) {
+        const key = secrets[src.secret];
+        if (!key) throw new Error(`${src.secret} secret not set (wrangler secret put ${src.secret})`);
+        url = url.replace("{secret}", encodeURIComponent(key));
+      }
+      const text = await fetchText(url);
+      const lines = src.format === "urlhaus-csv-online" ? parseUrlhausOnline(text) : parseLines(text);
       return src.kind === "d1" ? refreshD1Feed(db, src, lines, now) : refreshKvFeed(db, kv, src, lines, now);
     }),
   );
@@ -157,7 +236,13 @@ export async function refreshAllFeeds(db: WritableD1, kv: WritableKV, now: numbe
     results.map(async (r, i) => {
       if (r.status === "fulfilled") return r.value;
       const src = FEED_SOURCES[i];
-      const message = r.reason instanceof Error ? r.reason.message : String(r.reason);
+      let message = r.reason instanceof Error ? r.reason.message : String(r.reason);
+      // Scrub every configured secret (raw and URL-encoded): this text is stored in
+      // feed_meta and served publicly at /health.
+      for (const key of Object.values(secrets)) {
+        if (!key) continue;
+        message = message.split(key).join("[redacted]").split(encodeURIComponent(key)).join("[redacted]");
+      }
       // Record the failure in feed_meta too — a source that's been failing for
       // days should be visible at /health, not indistinguishable from "fresh".
       try {

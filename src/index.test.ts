@@ -436,15 +436,15 @@ test("POST /admin/refresh-feeds without D1/KV bindings -> 503", async () => {
   assert.equal(res.status, 503);
 });
 
-test("POST /admin/refresh-feeds with valid auth + bindings runs the refresh and returns all 6 outcomes", async () => {
+test("POST /admin/refresh-feeds with valid auth + bindings + secrets runs the refresh and returns all 6 outcomes", async () => {
   _resetBlobCacheForTests();
-  const result = await withFakeFetch("example.com\n", () =>
+  const result = await withFakeFetch('# abuse.ch URLhaus\n"1","d","http://x.example/","online"\nexample.com\n', () =>
     worker.fetch(
       new Request("http://localhost/admin/refresh-feeds", {
         method: "POST",
         headers: { authorization: "Bearer test-secret" },
       }),
-      fakeEnv(),
+      { ...fakeEnv(), URLHAUS_AUTH_KEY: "test-urlhaus-key" }, // a configured deploy; missing-key case: refresh.test.ts
       ctx,
     ),
   );

@@ -93,10 +93,19 @@ function fakeKv(): WritableKV & { store: Map<string, string> } {
   };
 }
 
+// Matches a fetched URL back to its source. Keyed sources (URLhaus) carry a
+// "{secret}" placeholder, so match on the part before it.
+function srcFor(url: string) {
+  return FEED_SOURCES.find((s) => url.startsWith(s.url.split("{secret}")[0]))!;
+}
+
+// "+" and "/" change under encodeURIComponent, so both scrub forms get exercised.
+const SECRETS = { URLHAUS_AUTH_KEY: "test+key/123" };
+
 // Canned text per source URL — order-independent, keyed by source name via FEED_SOURCES.
 function fetchTextFor(overrides: Record<string, string> = {}): FetchFn {
   return async (url: string) => {
-    const src = FEED_SOURCES.find((s) => s.url === url)!;
+    const src = srcFor(url);
     if (overrides[src.name] !== undefined) return overrides[src.name];
     return "# comment\nexample-a.com\nexample-b.com\n";
   };
@@ -114,7 +123,7 @@ test("D1 feed: diffs current rows against fresh fetch, applies only the delta", 
     "HaGeZi-Shortener": "stays.com\nnew.com\n", // gone.com dropped, new.com added
   });
 
-  const results = await refreshAllFeeds(db, kv, 1000, fetchText);
+  const results = await refreshAllFeeds(db, kv, 1000, fetchText, SECRETS);
   const outcome = results.find((r) => r.source === "HaGeZi-Shortener")!;
 
   assert.equal(outcome.status, "ok");
@@ -142,7 +151,7 @@ test("D1 feed: a diff larger than one chunk applies correctly across multiple st
   ].join("\n");
   const fetchText = fetchTextFor({ "HaGeZi-Shortener": freshLines });
 
-  const results = await refreshAllFeeds(db, kv, 1000, fetchText);
+  const results = await refreshAllFeeds(db, kv, 1000, fetchText, SECRETS);
   const outcome = results.find((r) => r.source === "HaGeZi-Shortener")!;
 
   assert.equal(outcome.status, "ok", `expected success, got: ${outcome.error}`);
@@ -160,7 +169,7 @@ test("D1 feed: no-op diff when nothing changed (zero writes needed)", async () =
   const kv = fakeKv();
   const fetchText = fetchTextFor({ "HaGeZi-AbusedTLD": "actor\n" });
 
-  const results = await refreshAllFeeds(db, kv, 1000, fetchText);
+  const results = await refreshAllFeeds(db, kv, 1000, fetchText, SECRETS);
   const outcome = results.find((r) => r.source === "HaGeZi-AbusedTLD")!;
   assert.equal(outcome.added, 0);
   assert.equal(outcome.removed, 0);
@@ -171,7 +180,7 @@ test("KV feed: full-blob overwrite, no diff logic", async () => {
   const kv = fakeKv();
   const fetchText = fetchTextFor({ "HaGeZi-TIF-domains": "evil-c.com\nevil-a.com\nevil-b.com\n" });
 
-  const results = await refreshAllFeeds(db, kv, 1000, fetchText);
+  const results = await refreshAllFeeds(db, kv, 1000, fetchText, SECRETS);
   const outcome = results.find((r) => r.source === "HaGeZi-TIF-domains")!;
 
   assert.equal(outcome.status, "ok");
@@ -184,12 +193,12 @@ test("one failing source does not block the other five (Promise.allSettled isola
   const db = fakeD1();
   const kv = fakeKv();
   const fetchText: FetchFn = async (url) => {
-    const src = FEED_SOURCES.find((s) => s.url === url)!;
+    const src = srcFor(url);
     if (src.name === "URLhaus") throw new Error("upstream is down");
     return "example.com\n";
   };
 
-  const results = await refreshAllFeeds(db, kv, 1000, fetchText);
+  const results = await refreshAllFeeds(db, kv, 1000, fetchText, SECRETS);
   assert.equal(results.length, FEED_SOURCES.length);
 
   const failed = results.find((r) => r.source === "URLhaus")!;
@@ -204,12 +213,12 @@ test("a failed source writes an error status to feed_meta, not silently skipped"
   const db = fakeD1({ feed_meta: [{ source: "URLhaus", last_refresh: 1, last_status: "ok", entry_count: 99 }] });
   const kv = fakeKv();
   const fetchText: FetchFn = async (url) => {
-    const src = FEED_SOURCES.find((s) => s.url === url)!;
+    const src = srcFor(url);
     if (src.name === "URLhaus") throw new Error("timeout");
     return "example.com\n";
   };
 
-  await refreshAllFeeds(db, kv, 2000, fetchText);
+  await refreshAllFeeds(db, kv, 2000, fetchText, SECRETS);
   const meta = db.tables.feed_meta.find((r) => r.source === "URLhaus")!;
   assert.match(meta.last_status as string, /error: timeout/);
   assert.equal(meta.last_refresh, 2000);
@@ -220,10 +229,83 @@ test("a failed source writes an error status to feed_meta, not silently skipped"
 test("refreshes all 6 declared feeds, none silently dropped", async () => {
   const db = fakeD1();
   const kv = fakeKv();
-  const results = await refreshAllFeeds(db, kv, 1000, fetchTextFor());
+  const results = await refreshAllFeeds(db, kv, 1000, fetchTextFor(), SECRETS);
   assert.equal(results.length, 6);
   assert.deepEqual(
     results.map((r) => r.source).sort(),
     ["HaGeZi-AbusedTLD", "HaGeZi-Entropy-NRD-7d", "HaGeZi-Shortener", "HaGeZi-TIF-domains", "HaGeZi-TIF-ips", "URLhaus"],
   );
+});
+
+// --- URLhaus via abuse.ch Auth-Key (2026-10-24: /downloads/ returns 410 Gone) ---
+
+const URLHAUS_CSV = [
+  "################################################################",
+  "# abuse.ch URLhaus Database Dump (CSV - recent URLs only)      #",
+  "# id,dateadded,url,url_status,last_online,threat,tags,urlhaus_link,reporter",
+  '"1","2026-10-24 10:00:00","http://bad.example/a.exe","online","2026-10-24 10:00:00","malware_download","exe","https://urlhaus.abuse.ch/url/1/","r"',
+  '"2","2026-10-24 10:00:00","http://gone.example/b","offline","","malware_download","","https://urlhaus.abuse.ch/url/2/","r"',
+  '"3","2026-10-24 10:00:00","http://bad.example/x?a=1,b=""q""","online","","malware_download","","https://urlhaus.abuse.ch/url/3/","r"',
+  "",
+].join("\n");
+
+test("URLhaus: fetches the keyed export and stores only ONLINE urls (quoted commas and quotes intact)", async () => {
+  const db = fakeD1();
+  const kv = fakeKv();
+  const seen: string[] = [];
+  const fetchText: FetchFn = async (url) => {
+    seen.push(url);
+    return srcFor(url).name === "URLhaus" ? URLHAUS_CSV : "example.com\n";
+  };
+  const results = await refreshAllFeeds(db, kv, 1000, fetchText, SECRETS);
+  const outcome = results.find((r) => r.source === "URLhaus")!;
+  assert.equal(outcome.status, "ok");
+  assert.equal(outcome.entryCount, 2);
+  assert.ok(seen.includes("https://urlhaus-api.abuse.ch/v2/files/exports/test%2Bkey%2F123/recent.csv"));
+  const urls = db.tables.feed_urls_exact.filter((r) => r.source === "URLhaus").map((r) => r.url);
+  assert.deepEqual(urls.sort(), ["http://bad.example/a.exe", 'http://bad.example/x?a=1,b="q"']);
+});
+
+test("URLhaus: missing URLHAUS_AUTH_KEY is a loud error, no fetch, other feeds unaffected", async () => {
+  const db = fakeD1();
+  const kv = fakeKv();
+  const seen: string[] = [];
+  const fetchText: FetchFn = async (url) => {
+    seen.push(url);
+    return "example.com\n";
+  };
+  const results = await refreshAllFeeds(db, kv, 1000, fetchText, {});
+  const outcome = results.find((r) => r.source === "URLhaus")!;
+  assert.equal(outcome.status, "error");
+  assert.match(outcome.error!, /URLHAUS_AUTH_KEY/);
+  assert.ok(!seen.some((u) => u.includes("urlhaus")), "must not fetch without the key");
+  assert.ok(results.filter((r) => r.source !== "URLhaus").every((r) => r.status === "ok"));
+});
+
+test("URLhaus: the key never reaches feed_meta or the returned error (public via /health)", async () => {
+  const db = fakeD1();
+  const kv = fakeKv();
+  const fetchText: FetchFn = async (url) => {
+    if (srcFor(url).name === "URLhaus") throw new Error(`fetch ${url} -> HTTP 401`);
+    return "example.com\n";
+  };
+  const results = await refreshAllFeeds(db, kv, 1000, fetchText, SECRETS);
+  const outcome = results.find((r) => r.source === "URLhaus")!;
+  const meta = db.tables.feed_meta.find((r) => r.source === "URLhaus")!;
+  for (const text of [outcome.error!, meta.last_status as string]) {
+    assert.ok(!text.includes("test+key/123") && !text.includes("test%2Bkey%2F123"), `key leaked: ${text}`);
+    assert.match(text, /\[redacted\]/);
+  }
+});
+
+test("URLhaus: a 200 that isn't the export, or has no online rows, is an error and keeps existing rows", async () => {
+  for (const body of ['{"query_status":"unknown_auth_key"}', URLHAUS_CSV.replace(/"online"/g, '"offline"')]) {
+    const db = fakeD1({ feed_urls_exact: [{ url: "http://kept.example/", source: "URLhaus" }] });
+    const kv = fakeKv();
+    const fetchText: FetchFn = async (url) => (srcFor(url).name === "URLhaus" ? body : "example.com\n");
+    const results = await refreshAllFeeds(db, kv, 1000, fetchText, SECRETS);
+    const outcome = results.find((r) => r.source === "URLhaus")!;
+    assert.equal(outcome.status, "error");
+    assert.deepEqual(db.tables.feed_urls_exact.map((r) => r.url), ["http://kept.example/"], "existing rows must not be wiped");
+  }
 });

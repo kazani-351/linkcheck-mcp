@@ -86,6 +86,7 @@ interface Env {
   FEEDS_DB?: WritableD1;
   VERDICT_CACHE?: WritableKV;
   VIRUSTOTAL_API_KEY?: string;
+  URLHAUS_AUTH_KEY?: string;
 }
 
 // Shared by check_url and check_text — resolve, clean, heuristically inspect, and
@@ -556,7 +557,7 @@ export default {
       if (!env.FEEDS_DB || !env.VERDICT_CACHE) {
         return Response.json({ error: "D1/KV bindings not configured" }, { status: 503 });
       }
-      const results = await refreshAllFeeds(env.FEEDS_DB, env.VERDICT_CACHE, Date.now());
+      const results = await refreshAllFeeds(env.FEEDS_DB, env.VERDICT_CACHE, Date.now(), undefined, { URLHAUS_AUTH_KEY: env.URLHAUS_AUTH_KEY });
       const anyFailed = results.some((r) => r.status === "error");
       return Response.json({ results }, { status: anyFailed ? 207 : 200 });
     }
@@ -573,6 +574,6 @@ export default {
   // up to ~14MB) takes longer than a bare invocation is guaranteed to stay alive.
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     if (!env.FEEDS_DB || !env.VERDICT_CACHE) return; // nothing to refresh without bindings
-    ctx.waitUntil(refreshAllFeeds(env.FEEDS_DB, env.VERDICT_CACHE, Date.now()).then(() => undefined));
+    ctx.waitUntil(refreshAllFeeds(env.FEEDS_DB, env.VERDICT_CACHE, Date.now(), undefined, { URLHAUS_AUTH_KEY: env.URLHAUS_AUTH_KEY }).then(() => undefined));
   },
 };
