@@ -112,9 +112,11 @@ export async function lookupTld(db: MinimalD1, hostname: string): Promise<FeedHi
 // --- Large feeds (SPEC §6/§18/§20 KV-blob pivot) ---
 // TIF domains (166K), TIF-IPs (62K), and Entropy-NRD/DGA (582K) don't fit D1's
 // row-write budget as one-row-per-entry tables. Each is stored as ONE KV value
-// (newline-joined) — a single PUT per refresh regardless of list size — and
-// parsed into an in-memory Set once per isolate, cached at module scope so a
-// 582K-entry blob isn't re-parsed on every request within a warm isolate.
+// (newline-joined) — a single PUT per refresh regardless of list size.
+// Blobs are written SORTED behind a header line and looked up by binary search
+// over the raw string, with no parse. Building a Set from them cost ~650 ms CPU
+// per cold isolate against Free's 10 ms, so ~1 in 10 requests died with
+// Cloudflare error 1102 (2026-10-24). The raw string is cached at module scope.
 
 export interface MinimalKV {
   get(key: string): Promise<string | null>;
@@ -138,13 +140,64 @@ const BLOB_CACHE_TTL_MS = 15 * 60 * 1000;
 // parse a 100K–580K-line blob itself — 5 URLs × 3 blobs blew the Worker CPU
 // limit in production (exceededCpu, 2026-09-27). A failed load is evicted so
 // the next lookup retries instead of replaying the error for 15 minutes.
-const blobSetCache = new Map<string, { set: Promise<Set<string>>; loadedAt: number }>();
+/** First line of every blob refresh.ts writes. A blob without it (written before
+ *  this format existed) is unsorted, and binary search over it would miss
+ *  entries — a false-safe — so it falls back to a Set until the next refresh. */
+export const SORTED_BLOB_HEADER = "#sorted-v1";
 
-function loadBlobSet(kv: MinimalKV, key: string): Promise<Set<string>> {
+/** The on-KV format: header, then entries in ascending code-unit order, unique.
+ *  Feeds that arrive sorted (HaGeZi NRD, 765K lines) skip the sort. */
+export function toSortedBlob(lines: string[]): string {
+  let sorted = true;
+  for (let i = 1; i < lines.length; i++) {
+    if (!(lines[i - 1] < lines[i])) {
+      sorted = false;
+      break;
+    }
+  }
+  const body = sorted ? lines : [...new Set(lines)].sort();
+  return `${SORTED_BLOB_HEADER}\n${body.join("\n")}`;
+}
+
+interface BlobIndex {
+  has(value: string): boolean;
+}
+
+/** Binary search over the raw sorted blob: O(log n) slices, no split. */
+function sortedBlobIndex(raw: string): BlobIndex {
+  const first = SORTED_BLOB_HEADER.length + 1;
+  return {
+    has(value: string): boolean {
+      let lo = first;
+      let hi = raw.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        const start = raw.lastIndexOf("\n", mid - 1) + 1;
+        let end = raw.indexOf("\n", start);
+        if (end === -1) end = raw.length;
+        const line = raw.slice(start, end);
+        if (line === value) return true;
+        if (line < value) lo = end + 1;
+        else hi = start;
+      }
+      return false;
+    },
+  };
+}
+
+function toBlobIndex(raw: string | null): BlobIndex {
+  if (!raw) return new Set<string>();
+  if (raw.startsWith(`${SORTED_BLOB_HEADER}\n`)) return sortedBlobIndex(raw);
+  return new Set(raw.split("\n").filter(Boolean));
+}
+
+const blobSetCache = new Map<string, { set: Promise<BlobIndex>; loadedAt: number }>();
+
+function loadBlobSet(kv: MinimalKV, key: string): Promise<BlobIndex> {
   const cached = blobSetCache.get(key);
   if (cached && Date.now() - cached.loadedAt < BLOB_CACHE_TTL_MS) return cached.set;
 
-  const set = kv.get(key).then((raw) => new Set(raw ? raw.split("\n").filter(Boolean) : []));
+  const set = kv.get(key).then(toBlobIndex);
   const entry = { set, loadedAt: Date.now() };
   blobSetCache.set(key, entry);
   set.catch(() => {
@@ -165,7 +218,7 @@ export async function lookupInBlob(kv: MinimalKV, blobKey: string, value: string
 }
 
 /** TIF domains use the same parent-label walk as lookupDomain (evasion-proof),
- *  but against the in-memory blob Set instead of a D1 query. */
+ *  but against the KV blob instead of a D1 query. */
 export async function lookupDomainInBlob(kv: MinimalKV, blobKey: string, hostname: string, source: string): Promise<FeedHit | null> {
   const set = await loadBlobSet(kv, blobKey);
   for (const candidate of parentChain(hostname)) {

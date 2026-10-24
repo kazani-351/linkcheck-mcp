@@ -7,7 +7,7 @@
 //   - KV (large feeds): one full-blob overwrite per refresh — a single PUT is
 //     cheap regardless of list size, and diffing 166K-582K entries in a Worker
 //     just to save one KV write isn't worth the complexity (SPEC §6).
-import type { WritableD1, WritableKV } from "./feeds.ts";
+import { toSortedBlob, type WritableD1, type WritableKV } from "./feeds.ts";
 
 const FETCH_TIMEOUT_MS = 30_000;
 // D1's real limit is 100 bound parameters per query (verified against docs AND
@@ -132,7 +132,7 @@ async function refreshD1Feed(db: WritableD1, src: FeedSource, freshLines: string
 
 /** Large feeds: one full-blob overwrite, no diff (SPEC §6). */
 async function refreshKvFeed(db: WritableD1, kv: WritableKV, src: FeedSource, freshLines: string[], now: number): Promise<RefreshOutcome> {
-  await kv.put(src.kvKey!, freshLines.join("\n"));
+  await kv.put(src.kvKey!, toSortedBlob(freshLines));
   await db
     .prepare("INSERT OR REPLACE INTO feed_meta (source, last_refresh, last_status, entry_count) VALUES (?, ?, 'ok', ?)")
     .bind(src.name, now, freshLines.length)

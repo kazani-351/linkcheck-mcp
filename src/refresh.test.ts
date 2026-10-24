@@ -169,14 +169,15 @@ test("D1 feed: no-op diff when nothing changed (zero writes needed)", async () =
 test("KV feed: full-blob overwrite, no diff logic", async () => {
   const db = fakeD1();
   const kv = fakeKv();
-  const fetchText = fetchTextFor({ "HaGeZi-TIF-domains": "evil-a.com\nevil-b.com\nevil-c.com\n" });
+  const fetchText = fetchTextFor({ "HaGeZi-TIF-domains": "evil-c.com\nevil-a.com\nevil-b.com\n" });
 
   const results = await refreshAllFeeds(db, kv, 1000, fetchText);
   const outcome = results.find((r) => r.source === "HaGeZi-TIF-domains")!;
 
   assert.equal(outcome.status, "ok");
   assert.equal(outcome.entryCount, 3);
-  assert.equal(kv.store.get("feed:tif-domains"), "evil-a.com\nevil-b.com\nevil-c.com");
+  // Written sorted with the header, so lookups binary-search it instead of parsing it (1102 fix).
+  assert.equal(kv.store.get("feed:tif-domains"), "#sorted-v1\nevil-a.com\nevil-b.com\nevil-c.com");
 });
 
 test("one failing source does not block the other five (Promise.allSettled isolation)", async () => {

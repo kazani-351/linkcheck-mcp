@@ -8,6 +8,8 @@ import {
   lookupInBlob,
   lookupDomainInBlob,
   _resetBlobCacheForTests,
+  toSortedBlob,
+  SORTED_BLOB_HEADER,
   type MinimalD1,
   type MinimalKV,
 } from "./feeds.ts";
@@ -149,6 +151,41 @@ test("lookupDomainInBlob: parent-label walk against blob-backed data (subdomain 
   const hit = await lookupDomainInBlob(kv, "feed:tif-domains", "login.attacker.evil.com", "HaGeZi-TIF-domains");
   assert.deepEqual(hit, { matchedValue: "evil.com", source: "HaGeZi-TIF-domains" });
   assert.equal(await lookupDomainInBlob(kv, "feed:tif-domains", "anthropic.com", "HaGeZi-TIF-domains"), null);
+});
+
+test("toSortedBlob: sorts, dedupes and prefixes the header; passes already-sorted input through", () => {
+  assert.equal(toSortedBlob(["b.com", "a.com", "b.com"]), `${SORTED_BLOB_HEADER}\na.com\nb.com`);
+  assert.equal(toSortedBlob(["a.com", "b.com"]), `${SORTED_BLOB_HEADER}\na.com\nb.com`);
+  assert.equal(toSortedBlob([]), `${SORTED_BLOB_HEADER}\n`);
+});
+
+test("sorted blob: binary search finds every entry and no non-entry (first, last, middle, gaps)", async () => {
+  _resetBlobCacheForTests();
+  const entries = Array.from({ length: 1000 }, (_, i) => `d${String(i).padStart(4, "0")}.com`);
+  const kv = fakeKv({ "feed:entropy-nrd": toSortedBlob(entries) });
+  for (const e of entries) {
+    assert.ok(await lookupInBlob(kv, "feed:entropy-nrd", e, "HaGeZi-Entropy-NRD"), `should find ${e}`);
+  }
+  for (const miss of ["", "a.com", "d0000.co", "d0500.comx", "d9999.com", "zzz.com", SORTED_BLOB_HEADER]) {
+    assert.equal(await lookupInBlob(kv, "feed:entropy-nrd", miss, "HaGeZi-Entropy-NRD"), null, `should not find ${JSON.stringify(miss)}`);
+  }
+});
+
+test("sorted blob: parent-label walk still prevents subdomain evasion", async () => {
+  _resetBlobCacheForTests();
+  const kv = fakeKv({ "feed:tif-domains": toSortedBlob(["other-bad.net", "evil.com"]) });
+  const hit = await lookupDomainInBlob(kv, "feed:tif-domains", "login.attacker.evil.com", "HaGeZi-TIF-domains");
+  assert.deepEqual(hit, { matchedValue: "evil.com", source: "HaGeZi-TIF-domains" });
+  assert.equal(await lookupDomainInBlob(kv, "feed:tif-domains", "anthropic.com", "HaGeZi-TIF-domains"), null);
+});
+
+test("legacy blob without the header (pre-sort KV data) is still matched correctly", async () => {
+  _resetBlobCacheForTests();
+  // Unsorted on purpose: binary search over this would miss "a.com" — a false-safe.
+  const kv = fakeKv({ "feed:tif-domains": "z.com\na.com\nm.com" });
+  for (const v of ["z.com", "a.com", "m.com"]) {
+    assert.ok(await lookupInBlob(kv, "feed:tif-domains", v, "HaGeZi-TIF-domains"), `should find ${v}`);
+  }
 });
 
 test("blob cache: kv.get is called once per key, not once per lookup", async () => {
