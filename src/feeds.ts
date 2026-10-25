@@ -82,18 +82,6 @@ export async function lookupIp(db: MinimalD1, ip: string): Promise<FeedHit | nul
   return hit ? { matchedValue: hit.ip, source: hit.source } : null;
 }
 
-/** URLhaus precision split (SPEC §6/§8): exact-URL match is the high-confidence
- *  signal (DANGEROUS-worthy); a bare domain hit is handled separately by
- *  lookupDomain and scored as SUSPICIOUS (compromised-legit-host nuance). */
-export async function lookupExactUrl(db: MinimalD1, url: string): Promise<FeedHit | null> {
-  const { results } = await db
-    .prepare("SELECT url, source FROM feed_urls_exact WHERE url = ?")
-    .bind(url)
-    .all<{ url: string; source: string }>();
-  const hit = results[0];
-  return hit ? { matchedValue: hit.url, source: hit.source } : null;
-}
-
 /** Abused-TLD check: matches the resolved hostname's final label against
  *  HaGeZi's Most-Abused-TLDs list. Suffix match, not the parent-label domain
  *  walk — a TLD list has no "subdomain evasion" concern of its own. */
@@ -110,7 +98,8 @@ export async function lookupTld(db: MinimalD1, hostname: string): Promise<FeedHi
 }
 
 // --- Large feeds (SPEC §6/§18/§20 KV-blob pivot) ---
-// TIF domains (166K), TIF-IPs (62K), and Entropy-NRD/DGA (582K) don't fit D1's
+// TIF domains (166K), TIF-IPs (62K), Entropy-NRD/DGA (582K) and URLhaus exact
+// URLs (60K+; exact-match only, SPEC §6/§8 precision split) don't fit D1's
 // row-write budget as one-row-per-entry tables. Each is stored as ONE KV value
 // (newline-joined) — a single PUT per refresh regardless of list size.
 // Blobs are written SORTED behind a header line and looked up by binary search

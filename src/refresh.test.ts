@@ -6,12 +6,11 @@ import type { WritableD1, WritableKV } from "./feeds.ts";
 // In-memory fake that understands the exact SQL shapes refresh.ts issues —
 // real diff/write semantics, not a generic SQL engine (mirrors the fakeDb
 // pattern already used in feeds.test.ts).
-function fakeD1(seed: { feed_domains?: Row[]; feed_urls_exact?: Row[]; feed_tlds?: Row[]; feed_meta?: Row[] } = {}): WritableD1 & {
+function fakeD1(seed: { feed_domains?: Row[]; feed_tlds?: Row[]; feed_meta?: Row[] } = {}): WritableD1 & {
   tables: Record<string, Row[]>;
 } {
   const tables: Record<string, Row[]> = {
     feed_domains: seed.feed_domains ?? [],
-    feed_urls_exact: seed.feed_urls_exact ?? [],
     feed_tlds: seed.feed_tlds ?? [],
     feed_meta: seed.feed_meta ?? [],
   };
@@ -80,8 +79,8 @@ function fakeD1(seed: { feed_domains?: Row[]; feed_urls_exact?: Row[]; feed_tlds
 
 type Row = Record<string, unknown>;
 
-function fakeKv(): WritableKV & { store: Map<string, string> } {
-  const store = new Map<string, string>();
+function fakeKv(seed: Record<string, string> = {}): WritableKV & { store: Map<string, string> } {
+  const store = new Map<string, string>(Object.entries(seed));
   return {
     store,
     async get(key: string) {
@@ -262,8 +261,7 @@ test("URLhaus: fetches the keyed export and stores only ONLINE urls (quoted comm
   assert.equal(outcome.status, "ok");
   assert.equal(outcome.entryCount, 2);
   assert.ok(seen.includes("https://urlhaus-api.abuse.ch/v2/files/exports/test%2Bkey%2F123/recent.csv"));
-  const urls = db.tables.feed_urls_exact.filter((r) => r.source === "URLhaus").map((r) => r.url);
-  assert.deepEqual(urls.sort(), ["http://bad.example/a.exe", 'http://bad.example/x?a=1,b="q"']);
+  assert.equal(kv.store.get("feed:urlhaus"), '#sorted-v1\nhttp://bad.example/a.exe\nhttp://bad.example/x?a=1,b="q"');
 });
 
 test("URLhaus: missing URLHAUS_AUTH_KEY is a loud error, no fetch, other feeds unaffected", async () => {
@@ -298,14 +296,14 @@ test("URLhaus: the key never reaches feed_meta or the returned error (public via
   }
 });
 
-test("URLhaus: a 200 that isn't the export, or has no online rows, is an error and keeps existing rows", async () => {
+test("URLhaus: a 200 that isn't the export, or has no online rows, is an error and keeps the existing blob", async () => {
   for (const body of ['{"query_status":"unknown_auth_key"}', URLHAUS_CSV.replace(/"online"/g, '"offline"')]) {
-    const db = fakeD1({ feed_urls_exact: [{ url: "http://kept.example/", source: "URLhaus" }] });
-    const kv = fakeKv();
+    const db = fakeD1();
+    const kv = fakeKv({ "feed:urlhaus": "#sorted-v1\nhttp://kept.example/" });
     const fetchText: FetchFn = async (url) => (srcFor(url).name === "URLhaus" ? body : "example.com\n");
     const results = await refreshAllFeeds(db, kv, 1000, fetchText, SECRETS);
     const outcome = results.find((r) => r.source === "URLhaus")!;
     assert.equal(outcome.status, "error");
-    assert.deepEqual(db.tables.feed_urls_exact.map((r) => r.url), ["http://kept.example/"], "existing rows must not be wiped");
+    assert.equal(kv.store.get("feed:urlhaus"), "#sorted-v1\nhttp://kept.example/", "existing blob must not be wiped");
   }
 });

@@ -67,7 +67,7 @@ Inspired by the Android app [URLCheck](https://github.com/TrianguloY/URLCheck), 
 Cloudflare Worker · stateless `createMcpHandler` (MCP SDK v2) · D1 (small feeds) + KV (large feeds + verdict cache) · daily Cron Trigger for feed refresh.
 
 ## Feed refresh
-Threat feeds refresh daily via a Cloudflare Cron Trigger (`17 6 * * *` UTC). Small feeds (URLhaus, HaGeZi Shortener/Abused-TLD, all in D1) are diffed — only added/removed rows are written, chunked to stay under D1's 100-bound-parameter-per-query limit. Large feeds (HaGeZi TIF-domains/TIF-IPs/Entropy-NRD, all in KV) are fully overwritten each refresh — one `PUT` regardless of list size. A failed source doesn't block the others; check `/health` for per-feed `last_status`/`last_refresh`.
+Threat feeds refresh daily via a Cloudflare Cron Trigger (`17 6 * * *` UTC). Small feeds (HaGeZi Shortener/Abused-TLD, in D1) are diffed — only added/removed rows are written, chunked to stay under D1's 100-bound-parameter-per-query limit. Large feeds (URLhaus, HaGeZi TIF-domains/TIF-IPs/Entropy-NRD, all in KV) are fully overwritten each refresh — one `PUT` regardless of list size. A failed source doesn't block the others; check `/health` for per-feed `last_status`/`last_refresh`.
 
 To trigger a refresh manually (local `wrangler dev` can't fire a real cron tick on macOS < 13.5, so this is also how the refresh logic is verified against production):
 ```bash

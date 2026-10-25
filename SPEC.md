@@ -104,10 +104,11 @@ Cloudflare Worker  ── createMcpHandler(() => createServer(env)), built fresh
    ▲
    │  bindings
    ▼
-D1 "linkcheck-mcp-feeds" ── feed_urls_exact (15,870), feed_domains/shortener-only
+D1 "linkcheck-mcp-feeds" ── feed_domains/shortener-only
    (9,815), feed_tlds (445), feed_meta (all 6 feeds' freshness)
 KV "linkcheck-mcp-cache" ── feed:tif-domains (166,569, 3.0MB blob),
-   feed:tif-ips (62,236, 0.9MB), feed:entropy-nrd (582,153, 13.8MB) —
+   feed:tif-ips (62,236, 0.9MB), feed:entropy-nrd (582,153, 13.8MB),
+   feed:urlhaus (exact URLs, 60K+; moved from D1 2026-10-25) —
    one PUT per refresh; verdict:<hash> cache keys land here too [NOT YET BUILT]
 Cron Trigger (17 6 * * * daily) — refresh.ts: BUILT + live. D1 feeds
    diffed (added/removed only, chunked at 40 rows/statement — D1's real
@@ -133,7 +134,7 @@ Cron Trigger (17 6 * * * daily) — refresh.ts: BUILT + live. D1 feeds
 
 **Tier 1 — small feeds → D1 row-per-entry** (all comfortably under the ~100k-writes/day ceiling, confirmed by real download):
 - `feed_domains(domain TEXT PRIMARY KEY, source TEXT)` — **HaGeZi URL-Shortener domains only** (9,815 rows). *(Originally drafted to also hold TIF/NRD — moved out once real sizes were known; see Tier 2.)*
-- `feed_urls_exact(url TEXT PRIMARY KEY, source TEXT)` — URLhaus **exact-URL** entries (15,870 rows).
+- ~~`feed_urls_exact`~~ — URLhaus moved to KV blob `feed:urlhaus` (2026-10-25): the `recent.csv` switch grew it to 60K+ URLs, and its first diff used 76% of the 100K/day row-write budget. Table left in place, unread.
 - `feed_tlds(tld TEXT PRIMARY KEY, source TEXT)` — HaGeZi Most-Abused-TLDs (445 rows). New table, not in the original draft — abused-TLD is a suffix match, a different shape than domain matching.
 - `feed_meta(source TEXT PRIMARY KEY, last_refresh INTEGER, last_status TEXT, entry_count INTEGER)` — freshness + observability, covers **all six** feeds (both tiers), surfaced at `/health`.
 - ~~`feed_ips`~~ — dropped (migration 0003); superseded by Tier 2.

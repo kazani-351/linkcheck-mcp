@@ -9,7 +9,6 @@ import { extractUrls } from "./extract.ts";
 import { resolveIp } from "./dns.ts";
 import {
   lookupDomain,
-  lookupExactUrl,
   lookupTld,
   lookupDomainInBlob,
   lookupInBlob,
@@ -123,7 +122,7 @@ async function checkOneUrl(url: string, env: Env, useVirusTotal = true) {
     const hostIsIpLiteral = isIpLiteral(hostname);
 
     const [exactUrlHit, shortenerHit, tldHit, tifDomainHit, nrdHit, dns] = await Promise.all([
-      lookupExactUrl(db, resolved.finalUrl),
+      lookupInBlob(kv, "feed:urlhaus", resolved.finalUrl, "URLhaus"),
       lookupDomain(db, hostname),
       lookupTld(db, hostname),
       lookupDomainInBlob(kv, "feed:tif-domains", hostname, "HaGeZi-TIF-domains"),

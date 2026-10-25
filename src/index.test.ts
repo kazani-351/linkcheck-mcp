@@ -24,9 +24,6 @@ function fakeEnv() {
           bind(...values: unknown[]) {
             return {
               async all<T>() {
-                if (sql.includes("feed_urls_exact") && values[0] === "https://example.com/") {
-                  return { results: [{ url: "https://example.com/", source: "TEST-URLhaus" }] as T[] };
-                }
                 if (sql.includes("feed_domains") && values[0] === "example.com") {
                   return { results: [{ domain: "example.com", source: "TEST-Shortener" }] as T[] };
                 }
@@ -43,7 +40,8 @@ function fakeEnv() {
       },
     },
     VERDICT_CACHE: {
-      async get() { return null; }, // no TIF-domain/IP hits — tested separately in feeds.test.ts
+      // Only the URLhaus exact-URL hit; TIF-domain/IP hits are tested in feeds.test.ts
+      async get(key: string) { return key === "feed:urlhaus" ? "#sorted-v1\nhttps://example.com/" : null; },
       async put() {}, // no-op — refresh.test.ts covers real KV-write semantics
     },
   };

@@ -22,8 +22,8 @@ export interface FeedSource {
   name: string; // matches feed_meta.source
   url: string;
   kind: "d1" | "kv";
-  table?: "feed_domains" | "feed_urls_exact" | "feed_tlds"; // d1 only
-  column?: "domain" | "url" | "tld"; // d1 only
+  table?: "feed_domains" | "feed_tlds"; // d1 only
+  column?: "domain" | "tld"; // d1 only
   kvKey?: string; // kv only
   // Keyed sources: the URL holds "{secret}", filled in at fetch time from this
   // Worker secret. Never inlined here, and scrubbed from every error message,
@@ -39,12 +39,14 @@ export interface FeedSecrets {
 export const FEED_SOURCES: FeedSource[] = [
   // abuse.ch retired /downloads/ (HTTP 410, 2026-10-24); exports now need a free
   // Auth-Key. recent.csv = URLs added in the last 30 days; we keep only "online".
+  // KV, not D1: the switch to recent.csv made a ~34K-row diff (2 rows_written
+  // each, PK index) that hit 76% of the free 100K/day and died at the
+  // 1,000-subrequest cap mid-run (2026-10-25). A blob is one PUT at any size.
   {
     name: "URLhaus",
     url: "https://urlhaus-api.abuse.ch/v2/files/exports/{secret}/recent.csv",
-    kind: "d1",
-    table: "feed_urls_exact",
-    column: "url",
+    kind: "kv",
+    kvKey: "feed:urlhaus",
     secret: "URLHAUS_AUTH_KEY",
     format: "urlhaus-csv-online",
   },
@@ -129,9 +131,9 @@ const URLHAUS_ROW = /^"(?:[^"]|"")*","(?:[^"]|"")*","((?:[^"]|"")*)","([^"]*)"/;
 /** URLhaus export: columns id,dateadded,url,url_status,... — keep url where url_status is "online". */
 export function parseUrlhausOnline(text: string): string[] {
   // A 200 that isn't the export (auth-error JSON, HTML notice, changed columns)
-  // would parse to zero URLs, and the D1 diff would then DELETE every URLhaus row
-  // while recording "ok" — silent detection loss plus ~95K D1 writes. Throw instead:
-  // feed_meta gets an error row and the existing rows stay.
+  // would parse to zero URLs, and the refresh would then overwrite the URLhaus blob
+  // with nothing while recording "ok" — silent detection loss. Throw instead:
+  // feed_meta gets an error row and the existing blob stays.
   if (!text.includes("# abuse.ch URLhaus")) throw new Error("URLhaus: response is not the abuse.ch export (header missing)");
   const out: string[] = [];
   for (const line of text.split("\n")) {

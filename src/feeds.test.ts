@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import {
   lookupDomain,
   lookupIp,
-  lookupExactUrl,
   lookupTld,
   lookupInBlob,
   lookupDomainInBlob,
@@ -20,7 +19,6 @@ import {
 function fakeDb(
   domains: Array<{ domain: string; source: string }>,
   ips: Array<{ ip: string; source: string }> = [],
-  urls: Array<{ url: string; source: string }> = [],
 ): MinimalD1 {
   return {
     prepare(sql: string) {
@@ -34,9 +32,6 @@ function fakeDb(
               }
               if (sql.includes("feed_ips")) {
                 return { results: ips.filter((i) => i.ip === values[0]) as T[] };
-              }
-              if (sql.includes("feed_urls_exact")) {
-                return { results: urls.filter((u) => u.url === values[0]) as T[] };
               }
               return { results: [] as T[] };
             },
@@ -84,15 +79,6 @@ test("lookupIp: exact match only", async () => {
   const db = fakeDb([], [{ ip: "203.0.113.5", source: "TIF-IPs" }]);
   assert.deepEqual(await lookupIp(db, "203.0.113.5"), { matchedValue: "203.0.113.5", source: "TIF-IPs" });
   assert.equal(await lookupIp(db, "203.0.113.6"), null);
-});
-
-test("lookupExactUrl: exact match only (URLhaus precision split)", async () => {
-  const db = fakeDb([], [], [{ url: "https://evil.com/payload.exe", source: "URLhaus" }]);
-  assert.deepEqual(
-    await lookupExactUrl(db, "https://evil.com/payload.exe"),
-    { matchedValue: "https://evil.com/payload.exe", source: "URLhaus" },
-  );
-  assert.equal(await lookupExactUrl(db, "https://evil.com/other"), null);
 });
 
 // --- lookupTld ---
