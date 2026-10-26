@@ -16,6 +16,9 @@ const FETCH_TIMEOUT_MS = 30_000;
 // change in 2s and isn't retried. A feed that fails for good is reported as one
 // (feed_meta + console.error).
 const RETRY_DELAY_MS = 2_000;
+// Past this, a feed's data is too old to back a SAFE: the cron is daily, so 48h
+// is two missed refreshes in a row (one failed day keeps yesterday's list in use).
+export const STALE_AFTER_MS = 48 * 60 * 60 * 1000;
 // D1's real limit is 100 bound parameters per query (verified against docs AND
 // hit live in production — a prior guess of 400 rows/statement, based on
 // vanilla SQLite's much higher 999-variable default, failed for real on
@@ -212,8 +215,8 @@ async function refreshD1Feed(db: WritableD1, src: FeedSource, freshLines: string
   }
 
   await db
-    .prepare("INSERT OR REPLACE INTO feed_meta (source, last_refresh, last_status, entry_count) VALUES (?, ?, 'ok', ?)")
-    .bind(src.name, now, fresh.size)
+    .prepare("INSERT OR REPLACE INTO feed_meta (source, last_refresh, last_status, entry_count, last_ok) VALUES (?, ?, 'ok', ?, ?)")
+    .bind(src.name, now, fresh.size, now)
     .run();
 
   return { source: src.name, status: "ok", entryCount: fresh.size, added: added.length, removed: removed.length };
@@ -223,8 +226,8 @@ async function refreshD1Feed(db: WritableD1, src: FeedSource, freshLines: string
 async function refreshKvFeed(db: WritableD1, kv: WritableKV, src: FeedSource, freshLines: string[], now: number): Promise<RefreshOutcome> {
   await kv.put(src.kvKey!, toSortedBlob(freshLines));
   await db
-    .prepare("INSERT OR REPLACE INTO feed_meta (source, last_refresh, last_status, entry_count) VALUES (?, ?, 'ok', ?)")
-    .bind(src.name, now, freshLines.length)
+    .prepare("INSERT OR REPLACE INTO feed_meta (source, last_refresh, last_status, entry_count, last_ok) VALUES (?, ?, 'ok', ?, ?)")
+    .bind(src.name, now, freshLines.length, now)
     .run();
   return { source: src.name, status: "ok", entryCount: freshLines.length };
 }
@@ -285,8 +288,9 @@ export async function refreshAllFeeds(
       // days should be visible at /health, not indistinguishable from "fresh".
       try {
         await db
-          .prepare("INSERT OR REPLACE INTO feed_meta (source, last_refresh, last_status, entry_count) VALUES (?, ?, ?, COALESCE((SELECT entry_count FROM feed_meta WHERE source = ?), 0))")
-          .bind(src.name, now, `error: ${message}`, src.name)
+          // entry_count and last_ok carry over: the old blob is still what's served.
+          .prepare("INSERT OR REPLACE INTO feed_meta (source, last_refresh, last_status, entry_count, last_ok) VALUES (?, ?, ?, COALESCE((SELECT entry_count FROM feed_meta WHERE source = ?), 0), (SELECT last_ok FROM feed_meta WHERE source = ?))")
+          .bind(src.name, now, `error: ${message}`, src.name, src.name)
           .run();
       } catch {
         /* feed_meta write itself failed — the allSettled result below still surfaces the original error */
@@ -294,4 +298,24 @@ export async function refreshAllFeeds(
       return { source: src.name, status: "error" as const, entryCount: 0, error: message };
     }),
   );
+}
+
+export interface FeedMetaRow {
+  source: string;
+  last_refresh?: number;
+  last_status: string;
+  entry_count?: number;
+  last_ok?: number | null;
+}
+
+/** One line per declared feed whose last successful refresh is missing or older
+ *  than STALE_AFTER_MS. Goes into a check's degraded[] (so never SAFE) and /health. */
+export function staleFeeds(rows: FeedMetaRow[], now: number): string[] {
+  const out: string[] = [];
+  for (const { name } of FEED_SOURCES) {
+    const lastOk = rows.find((r) => r.source === name)?.last_ok;
+    if (lastOk == null) out.push(`${name} feed stale (no successful refresh on record)`);
+    else if (now - lastOk > STALE_AFTER_MS) out.push(`${name} feed stale (last good refresh ${Math.floor((now - lastOk) / 3_600_000)}h ago)`);
+  }
+  return out;
 }

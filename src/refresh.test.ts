@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { refreshAllFeeds, FEED_SOURCES, type FetchFn } from "./refresh.ts";
+import { refreshAllFeeds, FEED_SOURCES, FeedHttpError, type FetchFn } from "./refresh.ts";
 import type { WritableD1, WritableKV } from "./feeds.ts";
 
 // In-memory fake that understands the exact SQL shapes refresh.ts issues —
@@ -59,13 +59,16 @@ function fakeD1(seed: { feed_domains?: Row[]; feed_tlds?: Row[]; feed_meta?: Row
                 return { success: true };
               }
               if (sql.includes("INSERT OR REPLACE INTO feed_meta")) {
+                // Two shapes: success binds (source, now, count, now); failure binds
+                // (source, now, status, …) and COALESCEs entry_count + last_ok from the old row.
                 const [source, lastRefresh, ...rest] = values as [string, number, ...unknown[]];
-                const lastStatus = sql.includes("COALESCE") ? (rest[0] as string) : (rest[0] as string);
-                const entryCount = sql.includes("COALESCE")
-                  ? tables.feed_meta.find((r) => r.source === source)?.entry_count ?? 0
-                  : rest[1];
+                const failed = sql.includes("COALESCE");
+                const prev = tables.feed_meta.find((r) => r.source === source);
+                const row = failed
+                  ? { last_status: rest[0], entry_count: prev?.entry_count ?? 0, last_ok: prev?.last_ok ?? null }
+                  : { last_status: "ok", entry_count: rest[0], last_ok: rest[1] };
                 tables.feed_meta = tables.feed_meta.filter((r) => r.source !== source);
-                tables.feed_meta.push({ source, last_refresh: lastRefresh, last_status: lastStatus, entry_count: entryCount } as Row);
+                tables.feed_meta.push({ source, last_refresh: lastRefresh, ...row } as Row);
                 return { success: true };
               }
               return { success: true };
@@ -405,4 +408,20 @@ test("retry: 404 is permanent too; 5xx, 429 and network errors are retried once"
   assert.equal(await urlhausAttempts(t, async () => new Response("slow down", { status: 429 })), 2);
   assert.equal(await urlhausAttempts(t, async () => { throw new TypeError("fetch failed"); }), 2);
   assert.equal(await urlhausAttempts(t, async () => { throw new DOMException("The operation timed out.", "TimeoutError"); }), 2);
+});
+
+test("last_ok: a success sets it to now; a failure keeps the last success instead of overwriting it", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const db = fakeD1({ feed_meta: [{ source: "URLhaus", last_refresh: 500, last_status: "ok", entry_count: 99, last_ok: 500 }] });
+  const fetchText: FetchFn = async (url) => {
+    if (srcFor(url).name === "URLhaus") throw new FeedHttpError(url, 401);
+    return "example.com\n";
+  };
+
+  await refreshAllFeeds(db, fakeKv(), 2000, fetchText, SECRETS, 0);
+  const urlhaus = db.tables.feed_meta.find((r) => r.source === "URLhaus")!;
+  assert.equal(urlhaus.last_refresh, 2000, "last_refresh is the last attempt");
+  assert.equal(urlhaus.last_ok, 500, "a failed refresh must not move last_ok");
+  const shortener = db.tables.feed_meta.find((r) => r.source === "HaGeZi-Shortener")!;
+  assert.equal(shortener.last_ok, 2000, "a successful refresh sets last_ok");
 });

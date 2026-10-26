@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import worker from "./index.ts";
 import { _resetBlobCacheForTests, toSortedBlob } from "./feeds.ts";
+import { FEED_SOURCES } from "./refresh.ts";
 
 const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
 const ENV = { MCP_BEARER_TOKEN: "test-secret", OWNER_TOKEN: "test-secret" };
@@ -34,7 +35,15 @@ function blobKv(overrides: Record<string, string | null> = {}) {
   };
 }
 
-function fakeEnv(feedMeta: Array<{ source: string; last_status: string }> = []) {
+type MetaRow = { source: string; last_status: string; last_ok?: number | null };
+const HOUR = 60 * 60 * 1000;
+
+/** Every feed refreshed just now: the healthy baseline. `overrides` replace rows by source. */
+function freshMeta(...overrides: MetaRow[]): MetaRow[] {
+  return FEED_SOURCES.map((f) => overrides.find((o) => o.source === f.name) ?? { source: f.name, last_status: "ok", last_ok: Date.now() });
+}
+
+function fakeEnv(feedMeta: MetaRow[] = freshMeta()) {
   return {
     MCP_BEARER_TOKEN: "test-secret",
     OWNER_TOKEN: "test-secret",
@@ -185,13 +194,13 @@ test("/health says degraded and names the blob when feed:urlhaus is missing", as
 });
 
 test("/health stays ok when every feed's last refresh was ok", async () => {
-  const env = fakeEnv([{ source: "URLhaus", last_status: "ok" }, { source: "HaGeZi-TIF-ips", last_status: "ok" }]);
+  const env = fakeEnv(freshMeta());
   const body = await (await worker.fetch(new Request("http://localhost/health"), env, ctx)).json() as { status: string };
   assert.equal(body.status, "ok");
 });
 
 test("/health says degraded when a feed's last refresh failed, even though its old blob is still there", async () => {
-  const env = fakeEnv([{ source: "URLhaus", last_status: "error: fetch -> HTTP 502" }, { source: "HaGeZi-TIF-ips", last_status: "ok" }]);
+  const env = fakeEnv(freshMeta({ source: "URLhaus", last_status: "error: fetch -> HTTP 502", last_ok: Date.now() }));
   const res = await worker.fetch(new Request("http://localhost/health"), env, ctx);
   assert.equal(res.status, 200);
   const body = await res.json() as { status: string; blobs: Record<string, string> };
@@ -243,6 +252,45 @@ async function postCheck(url: string, env: ReturnType<typeof fakeEnv>) {
   );
   return res.json() as Promise<{ verdict: string; degraded: string[]; finalUrl: string; feedSignals: Array<{ type: string; matchedValue: string }> }>;
 }
+
+// The production-shaped AC1 case: the refresh kept failing, but yesterday's blob
+// is still in KV, so the lookup itself works. Age of the last good refresh decides.
+test("/check is not SAFE when an old blob is still there but the last good refresh is over 48h old", async () => {
+  const pages = { "https://clean.example/": new Response(null, { status: 200 }) };
+  await withFakeWeb(pages, async () => {
+    _resetBlobCacheForTests();
+    const stale = fakeEnv(freshMeta({ source: "URLhaus", last_status: "error: fetch -> HTTP 503", last_ok: Date.now() - 49 * HOUR }));
+    const r = await postCheck("https://clean.example/", stale);
+    assert.notEqual(r.verdict, "SAFE");
+    assert.ok(r.degraded.some((d) => /^URLhaus feed stale \(last good refresh 49h ago\)/.test(d)), JSON.stringify(r.degraded));
+  });
+});
+
+test("/check stays SAFE inside the 48h window, and a cron that stopped running is caught too", async () => {
+  const pages = { "https://clean.example/": new Response(null, { status: 200 }) };
+  await withFakeWeb(pages, async () => {
+    _resetBlobCacheForTests();
+    const recent = fakeEnv(freshMeta({ source: "URLhaus", last_status: "error: fetch -> HTTP 503", last_ok: Date.now() - 47 * HOUR }));
+    assert.equal((await postCheck("https://clean.example/", recent)).verdict, "SAFE");
+
+    // No failure recorded at all — the cron just never ran — and the status still says ok.
+    const stopped = fakeEnv(freshMeta({ source: "HaGeZi-TIF-ips", last_status: "ok", last_ok: Date.now() - 72 * HOUR }));
+    const r = await postCheck("https://clean.example/", stopped);
+    assert.notEqual(r.verdict, "SAFE");
+    assert.ok(r.degraded.some((d) => d.startsWith("HaGeZi-TIF-ips feed stale")));
+
+    // A feed with no successful refresh on record (null after the 0004 backfill, or no row).
+    const never = fakeEnv(freshMeta({ source: "HaGeZi-Shortener", last_status: "error: x", last_ok: null }));
+    assert.ok((await postCheck("https://clean.example/", never)).degraded.some((d) => d.startsWith("HaGeZi-Shortener feed stale (no successful refresh")));
+  });
+});
+
+test("/health says degraded when a feed's last good refresh is over 48h old, even with status ok", async () => {
+  const env = fakeEnv(freshMeta({ source: "HaGeZi-TIF-ips", last_status: "ok", last_ok: Date.now() - 72 * HOUR }));
+  const body = await (await worker.fetch(new Request("http://localhost/health"), env, ctx)).json() as { status: string; stale: string[] };
+  assert.equal(body.status, "degraded");
+  assert.deepEqual(body.stale, ["HaGeZi-TIF-ips feed stale (last good refresh 72h ago)"]);
+});
 
 test("/check never says SAFE when feed:urlhaus is deleted or unparseable", async () => {
   const pages = { "https://clean.example/": new Response(null, { status: 200 }) };

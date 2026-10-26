@@ -15,13 +15,14 @@ import {
   lookupFirstInBlob,
   probeBlob,
   type FeedHit,
+  type MinimalD1,
   type StreamKV,
   type WritableD1,
   type WritableKV,
 } from "./feeds.ts";
 import { computeVerdict, type Verdict } from "./scorer.ts";
 import { checkVirusTotal } from "./virustotal.ts";
-import { refreshAllFeeds, FEED_SOURCES } from "./refresh.ts";
+import { refreshAllFeeds, FEED_SOURCES, staleFeeds, type FeedMetaRow } from "./refresh.ts";
 import { landingHtml, SERVER_CARD_JSON, LINK_HEADER, LLMS_TXT } from "./landing.ts";
 import { VERSION, PROD_ORIGIN } from "./meta.ts";
 import { LOGO_SVG, MARK_SVG, OG_PNG_B64, APPLE_ICON_PNG_B64, ICON_256_PNG_B64 } from "./brand-assets.ts";
@@ -131,6 +132,9 @@ async function checkOneUrl(url: string, env: Env, useVirusTotal = true) {
   if (hostname && env.FEEDS_DB && env.VERDICT_CACHE) {
     const db = env.FEEDS_DB;
     const kv = env.VERDICT_CACHE;
+    // Started now, awaited after the lookups: an old blob still answers lookups,
+    // so only the age of the last good refresh can say the answer is out of date.
+    const stale = feedStaleness(db);
 
     // If the host is already a literal IP, there's nothing to resolve — skip the
     // pointless DoH call and check that IP directly (real bug found+fixed via
@@ -166,6 +170,7 @@ async function checkOneUrl(url: string, env: Env, useVirusTotal = true) {
       const ipHit = await blobLookup("HaGeZi-TIF-ips", degraded, (src) => lookupInBlob(kv, "feed:tif-ips", ip, src));
       if (ipHit) feedSignals.push({ ...ipHit, type: "threat_intel_ip" });
     }
+    degraded.push(...(await stale));
   } else if (hostname) {
     degraded.push("feed lookups skipped: D1/KV bindings not configured");
   }
@@ -468,17 +473,40 @@ function createServer(env: Env): McpServer {
 
 export { createServer };
 
-async function readFeedMeta(env: Env): Promise<unknown> {
+async function queryFeedMeta(db: MinimalD1): Promise<FeedMetaRow[]> {
+  const { results } = await db.prepare("SELECT source, last_refresh, last_status, entry_count, last_ok FROM feed_meta").bind().all<FeedMetaRow>();
+  return results;
+}
+
+async function readFeedMeta(env: Env): Promise<FeedMetaRow[] | string> {
   if (!env.FEEDS_DB) return "unavailable (D1 not bound)";
   try {
-    const { results } = await env.FEEDS_DB.prepare(
-      "SELECT source, last_refresh, last_status, entry_count FROM feed_meta",
-    )
-      .bind()
-      .all();
-    return results;
+    return await queryFeedMeta(env.FEEDS_DB);
   } catch (e) {
     return `error reading feed_meta: ${(e as Error).message}`;
+  }
+}
+
+// Every check reads feed freshness, so check_text's 20 URLs would be 20 D1 reads.
+// One in-flight read per isolate (and per binding, for test isolation), reused
+// for 5 min; a failed read is evicted so the next check tries again.
+const FRESHNESS_TTL_MS = 5 * 60 * 1000;
+const freshnessCache = new WeakMap<object, { at: number; rows: Promise<FeedMetaRow[]> }>();
+
+async function feedStaleness(db: MinimalD1): Promise<string[]> {
+  let cached = freshnessCache.get(db);
+  if (!cached || Date.now() - cached.at >= FRESHNESS_TTL_MS) {
+    const entry = { at: Date.now(), rows: queryFeedMeta(db) };
+    freshnessCache.set(db, entry);
+    entry.rows.catch(() => {
+      if (freshnessCache.get(db) === entry) freshnessCache.delete(db);
+    });
+    cached = entry;
+  }
+  try {
+    return staleFeeds(await cached.rows, Date.now());
+  } catch (e) {
+    return [`feed freshness unknown (${(e as Error).message})`];
   }
 }
 
@@ -545,9 +573,10 @@ export default {
       // blob check alone would report ok while it goes stale.
       const [blobs, feeds] = await Promise.all([readBlobStatus(env), readFeedMeta(env)]);
       const blobsOk = typeof blobs === "object" && Object.values(blobs).every((v) => v === "ok");
-      const feedsOk = Array.isArray(feeds) && feeds.every((f) => (f as { last_status?: unknown }).last_status === "ok");
+      const feedsOk = Array.isArray(feeds) && feeds.every((f) => f.last_status === "ok");
+      const stale = Array.isArray(feeds) ? staleFeeds(feeds, Date.now()) : [];
       return Response.json(
-        { status: blobsOk && feedsOk ? "ok" : "degraded", service: "linkcheck-mcp", version: VERSION, feeds, blobs },
+        { status: blobsOk && feedsOk && stale.length === 0 ? "ok" : "degraded", service: "linkcheck-mcp", version: VERSION, feeds, stale, blobs },
         { headers: { link: LINK_HEADER } },
       );
     }
