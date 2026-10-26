@@ -13,7 +13,7 @@ const FETCH_TIMEOUT_MS = 30_000;
 // The cron runs once a day, so a single blip upstream would leave a feed a full
 // day stale. One retry after a short pause covers transient errors; a feed that
 // fails twice is a real outage and is reported as one (feed_meta + console.error).
-export const RETRY_DELAY_MS = 2_000;
+const RETRY_DELAY_MS = 2_000;
 // D1's real limit is 100 bound parameters per query (verified against docs AND
 // hit live in production — a prior guess of 400 rows/statement, based on
 // vanilla SQLite's much higher 999-variable default, failed for real on

@@ -21,7 +21,7 @@ import {
 } from "./feeds.ts";
 import { computeVerdict, type Verdict } from "./scorer.ts";
 import { checkVirusTotal } from "./virustotal.ts";
-import { refreshAllFeeds } from "./refresh.ts";
+import { refreshAllFeeds, FEED_SOURCES } from "./refresh.ts";
 import { landingHtml, SERVER_CARD_JSON, LINK_HEADER, LLMS_TXT } from "./landing.ts";
 import { VERSION, PROD_ORIGIN } from "./meta.ts";
 import { LOGO_SVG, MARK_SVG, OG_PNG_B64, APPLE_ICON_PNG_B64, ICON_256_PNG_B64 } from "./brand-assets.ts";
@@ -93,9 +93,13 @@ interface Env {
 
 /** A KV feed that can't be read degrades the check (verdict at least
  *  SUSPICIOUS, reason names the feed) instead of reading as "not listed". */
-async function blobLookup(lookup: Promise<FeedHit | null>, source: string, degraded: string[]): Promise<FeedHit | null> {
+async function blobLookup(
+  source: string,
+  degraded: string[],
+  lookup: (source: string) => Promise<FeedHit | null>,
+): Promise<FeedHit | null> {
   try {
-    return await lookup;
+    return await lookup(source);
   } catch (e) {
     degraded.push(`${source} feed unavailable (${(e as Error).message})`);
     return null;
@@ -141,11 +145,11 @@ async function checkOneUrl(url: string, env: Env, useVirusTotal = true) {
     const urlhausCandidates = [...new Set([resolved.inputUrl, ...resolved.chain, resolved.finalUrl])];
 
     const [exactUrlHit, shortenerHit, tldHit, tifDomainHit, nrdHit, dns] = await Promise.all([
-      blobLookup(lookupFirstInBlob(kv, "feed:urlhaus", urlhausCandidates, "URLhaus"), "URLhaus", degraded),
+      blobLookup("URLhaus", degraded, (src) => lookupFirstInBlob(kv, "feed:urlhaus", urlhausCandidates, src)),
       lookupDomain(db, hostname),
       lookupTld(db, hostname),
-      blobLookup(lookupDomainInBlob(kv, "feed:tif-domains", hostname, "HaGeZi-TIF-domains"), "HaGeZi-TIF-domains", degraded),
-      blobLookup(lookupDomainInBlob(kv, "feed:entropy-nrd", hostname, "HaGeZi-Entropy-NRD"), "HaGeZi-Entropy-NRD", degraded),
+      blobLookup("HaGeZi-TIF-domains", degraded, (src) => lookupDomainInBlob(kv, "feed:tif-domains", hostname, src)),
+      blobLookup("HaGeZi-Entropy-NRD", degraded, (src) => lookupDomainInBlob(kv, "feed:entropy-nrd", hostname, src)),
       hostIsIpLiteral ? Promise.resolve({ ip: hostname.replace(/^\[|\]$/g, "") }) : resolveIp(hostname),
     ]);
 
@@ -158,7 +162,8 @@ async function checkOneUrl(url: string, env: Env, useVirusTotal = true) {
     if ("degraded" in dns && dns.degraded) degraded.push(dns.degraded);
     resolvedIp = dns.ip;
     if (dns.ip) {
-      const ipHit = await blobLookup(lookupInBlob(kv, "feed:tif-ips", dns.ip, "HaGeZi-TIF-ips"), "HaGeZi-TIF-ips", degraded);
+      const ip = dns.ip;
+      const ipHit = await blobLookup("HaGeZi-TIF-ips", degraded, (src) => lookupInBlob(kv, "feed:tif-ips", ip, src));
       if (ipHit) feedSignals.push({ ...ipHit, type: "threat_intel_ip" });
     }
   } else if (hostname) {
@@ -477,7 +482,8 @@ async function readFeedMeta(env: Env): Promise<unknown> {
   }
 }
 
-const BLOB_KEYS = ["feed:urlhaus", "feed:tif-domains", "feed:tif-ips", "feed:entropy-nrd"];
+// Every KV-tier feed the refresh writes, so a new one can't be missed here.
+const BLOB_KEYS = FEED_SOURCES.flatMap((s) => (s.kind === "kv" && s.kvKey ? [s.kvKey] : []));
 
 // /health is public and each probe is a KV read, which shares the free 100K/day
 // read quota with the feed lookups. Cached per isolate (and per binding, so tests
@@ -490,9 +496,7 @@ async function readBlobStatus(env: Env): Promise<Record<string, string> | string
   const kv = env.VERDICT_CACHE;
   const cached = blobStatusCache.get(kv);
   if (cached && Date.now() - cached.at < BLOB_STATUS_TTL_MS) return cached.status;
-  const status = Promise.all(BLOB_KEYS.map((k) => probeBlob(kv, k))).then((states) =>
-    Object.fromEntries(BLOB_KEYS.map((k, i) => [k, states[i]])),
-  );
+  const status = Promise.all(BLOB_KEYS.map(async (k) => [k, await probeBlob(kv, k)] as const)).then(Object.fromEntries);
   blobStatusCache.set(kv, { at: Date.now(), status });
   return status;
 }

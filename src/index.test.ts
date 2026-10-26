@@ -34,7 +34,7 @@ function blobKv(overrides: Record<string, string | null> = {}) {
   };
 }
 
-function fakeEnv() {
+function fakeEnv(feedMeta: Array<{ source: string; last_status: string }> = []) {
   return {
     MCP_BEARER_TOKEN: "test-secret",
     OWNER_TOKEN: "test-secret",
@@ -44,6 +44,7 @@ function fakeEnv() {
           bind(...values: unknown[]) {
             return {
               async all<T>() {
+                if (sql.includes("FROM feed_meta")) return { results: feedMeta as T[] };
                 if (sql.includes("feed_domains") && values[0] === "example.com") {
                   return { results: [{ domain: "example.com", source: "TEST-Shortener" }] as T[] };
                 }
@@ -183,25 +184,14 @@ test("/health says degraded and names the blob when feed:urlhaus is missing", as
   assert.equal(body.blobs["feed:tif-domains"], "ok");
 });
 
-// fakeEnv's D1 with feed_meta rows planted, for the /health status tests.
-function envWithFeedMeta(rows: Array<{ source: string; last_status: string }>) {
-  const env = fakeEnv();
-  const prepare = env.FEEDS_DB.prepare;
-  env.FEEDS_DB.prepare = (sql: string) =>
-    sql.includes("FROM feed_meta")
-      ? ({ bind: () => ({ all: async <T>() => ({ results: rows as T[] }), run: async () => ({ success: true }) }) } as ReturnType<typeof prepare>)
-      : prepare(sql);
-  return env;
-}
-
 test("/health stays ok when every feed's last refresh was ok", async () => {
-  const env = envWithFeedMeta([{ source: "URLhaus", last_status: "ok" }, { source: "HaGeZi-TIF-ips", last_status: "ok" }]);
+  const env = fakeEnv([{ source: "URLhaus", last_status: "ok" }, { source: "HaGeZi-TIF-ips", last_status: "ok" }]);
   const body = await (await worker.fetch(new Request("http://localhost/health"), env, ctx)).json() as { status: string };
   assert.equal(body.status, "ok");
 });
 
 test("/health says degraded when a feed's last refresh failed, even though its old blob is still there", async () => {
-  const env = envWithFeedMeta([{ source: "URLhaus", last_status: "error: fetch -> HTTP 502" }, { source: "HaGeZi-TIF-ips", last_status: "ok" }]);
+  const env = fakeEnv([{ source: "URLhaus", last_status: "error: fetch -> HTTP 502" }, { source: "HaGeZi-TIF-ips", last_status: "ok" }]);
   const res = await worker.fetch(new Request("http://localhost/health"), env, ctx);
   assert.equal(res.status, 200);
   const body = await res.json() as { status: string; blobs: Record<string, string> };
@@ -218,9 +208,8 @@ test("/health says degraded when feed_meta can't be read", async () => {
 
 // Deterministic web for /check: canned HEAD responses per URL, DoH answers with
 // an IP on no feed. Anything else is a test bug, so it throws.
-async function withFakeWeb<T>(pages: Record<string, Response>, run: () => Promise<T>): Promise<T> {
-  const original = globalThis.fetch;
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
+function withFakeWeb<T>(pages: Record<string, Response>, run: () => Promise<T>): Promise<T> {
+  return withFetch(async (input) => {
     const url = String(input instanceof Request ? input.url : input);
     if (url.startsWith("https://cloudflare-dns.com/")) {
       return Response.json({ Answer: [{ type: 1, data: "198.51.100.20" }] });
@@ -228,7 +217,13 @@ async function withFakeWeb<T>(pages: Record<string, Response>, run: () => Promis
     const page = pages[url];
     if (!page) throw new Error(`unexpected fetch: ${url}`);
     return page.clone();
-  }) as typeof fetch;
+  }, run);
+}
+
+/** Swaps globalThis.fetch for `impl` while `run` runs, restoring it after. */
+async function withFetch<T>(impl: (input: RequestInfo | URL) => Promise<Response>, run: () => Promise<T>): Promise<T> {
+  const original = globalThis.fetch;
+  globalThis.fetch = impl as typeof fetch;
   try {
     return await run();
   } finally {
@@ -535,14 +530,8 @@ test("check_text description warns excerpts are data and SAFE doesn't cover hidd
 // wiring to refreshAllFeeds). A temporary global fetch override keeps this fast
 // and independent of real network / the live feed sources being reachable.
 
-async function withFakeFetch<T>(canned: string, run: () => Promise<T>): Promise<T> {
-  const original = globalThis.fetch;
-  globalThis.fetch = (async () => new Response(canned)) as typeof fetch;
-  try {
-    return await run();
-  } finally {
-    globalThis.fetch = original;
-  }
+function withFakeFetch<T>(canned: string, run: () => Promise<T>): Promise<T> {
+  return withFetch(async () => new Response(canned), run);
 }
 
 test("POST /admin/refresh-feeds without auth -> 401", async () => {

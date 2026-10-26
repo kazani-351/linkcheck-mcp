@@ -133,13 +133,15 @@ const BLOB_CACHE_TTL_MS = 15 * 60 * 1000;
  *  2026-10-24, so a blob without it is not ours to binary-search (an unsorted
  *  body would miss entries — a false-safe) and is rejected as unusable. */
 export const SORTED_BLOB_HEADER = "#sorted-v1";
+/** Header plus its newline: where a blob's entries start. */
+const HEADER_LINE_LEN = SORTED_BLOB_HEADER.length + 1;
 
 /** Same rules as toBlobIndex, on just the blob's first bytes: null if usable,
  *  else the reason. Shared with /health, which must not read whole blobs. */
 function blobProblem(head: string | null): string | null {
   if (head === null) return "missing";
   if (!head.startsWith(`${SORTED_BLOB_HEADER}\n`)) return "unparseable (no sorted header)";
-  if (head.length === SORTED_BLOB_HEADER.length + 1) return "empty";
+  if (head.length === HEADER_LINE_LEN) return "empty";
   return null;
 }
 
@@ -163,10 +165,9 @@ interface BlobIndex {
 
 /** Binary search over the raw sorted blob: O(log n) slices, no split. */
 function sortedBlobIndex(raw: string): BlobIndex {
-  const first = SORTED_BLOB_HEADER.length + 1;
   return {
     has(value: string): boolean {
-      let lo = first;
+      let lo = HEADER_LINE_LEN;
       let hi = raw.length;
       while (lo < hi) {
         const mid = (lo + hi) >>> 1;
@@ -212,27 +213,20 @@ export function _resetBlobCacheForTests(): void {
   blobSetCache.clear();
 }
 
-export async function lookupInBlob(kv: MinimalKV, blobKey: string, value: string, source: string): Promise<FeedHit | null> {
-  const set = await loadBlobSet(kv, blobKey);
-  return set.has(value) ? { matchedValue: value, source } : null;
-}
-
-/** TIF domains use the same parent-label walk as lookupDomain (evasion-proof),
- *  but against the KV blob instead of a D1 query. */
-export async function lookupDomainInBlob(kv: MinimalKV, blobKey: string, hostname: string, source: string): Promise<FeedHit | null> {
-  const set = await loadBlobSet(kv, blobKey);
-  for (const candidate of parentChain(hostname)) {
-    if (set.has(candidate)) return { matchedValue: candidate, source };
-  }
-  return null;
-}
-
 /** First of `values` found in the blob, in order — one blob load for all of them. */
 export async function lookupFirstInBlob(kv: MinimalKV, blobKey: string, values: string[], source: string): Promise<FeedHit | null> {
   const set = await loadBlobSet(kv, blobKey);
   const hit = values.find((v) => set.has(v));
   return hit === undefined ? null : { matchedValue: hit, source };
 }
+
+export const lookupInBlob = (kv: MinimalKV, blobKey: string, value: string, source: string) =>
+  lookupFirstInBlob(kv, blobKey, [value], source);
+
+/** TIF domains use the same parent-label walk as lookupDomain (evasion-proof),
+ *  but against the KV blob instead of a D1 query. */
+export const lookupDomainInBlob = (kv: MinimalKV, blobKey: string, hostname: string, source: string) =>
+  lookupFirstInBlob(kv, blobKey, parentChain(hostname), source);
 
 /** KV slice that can stream a value — real Workers KV does. Lets /health check a
  *  blob from its first chunk instead of reading 17 MB (NRD) on every ping. */
@@ -249,7 +243,7 @@ export async function probeBlob(kv: StreamKV, key: string): Promise<string> {
     const decoder = new TextDecoder();
     let head = "";
     // Chunks can split anywhere; stop once one byte past the header line is in.
-    while (head.length <= SORTED_BLOB_HEADER.length + 1) {
+    while (head.length <= HEADER_LINE_LEN) {
       const { value, done } = await reader.read();
       if (done) break;
       head += decoder.decode(value, { stream: true });
