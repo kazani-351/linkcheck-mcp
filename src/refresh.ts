@@ -10,6 +10,10 @@
 import { toSortedBlob, type WritableD1, type WritableKV } from "./feeds.ts";
 
 const FETCH_TIMEOUT_MS = 30_000;
+// The cron runs once a day, so a single blip upstream would leave a feed a full
+// day stale. One retry after a short pause covers transient errors; a feed that
+// fails twice is a real outage and is reported as one (feed_meta + console.error).
+export const RETRY_DELAY_MS = 2_000;
 // D1's real limit is 100 bound parameters per query (verified against docs AND
 // hit live in production — a prior guess of 400 rows/statement, based on
 // vanilla SQLite's much higher 999-variable default, failed for real on
@@ -219,7 +223,19 @@ export async function refreshAllFeeds(
   now: number,
   fetchText: FetchFn = defaultFetchFeedText,
   secrets: FeedSecrets = {},
+  retryDelayMs: number = RETRY_DELAY_MS,
 ): Promise<RefreshOutcome[]> {
+  // Retries the download only: a missing secret or an unparseable 200 won't
+  // change on a second try.
+  const fetchWithRetry = async (url: string): Promise<string> => {
+    try {
+      return await fetchText(url);
+    } catch {
+      await new Promise((r) => setTimeout(r, retryDelayMs));
+      return fetchText(url);
+    }
+  };
+
   const results = await Promise.allSettled(
     FEED_SOURCES.map(async (src): Promise<RefreshOutcome> => {
       let url = src.url;
@@ -228,7 +244,7 @@ export async function refreshAllFeeds(
         if (!key) throw new Error(`${src.secret} secret not set (wrangler secret put ${src.secret})`);
         url = url.replace("{secret}", encodeURIComponent(key));
       }
-      const text = await fetchText(url);
+      const text = await fetchWithRetry(url);
       const lines = src.format === "urlhaus-csv-online" ? parseUrlhausOnline(text) : parseLines(text);
       return src.kind === "d1" ? refreshD1Feed(db, src, lines, now) : refreshKvFeed(db, kv, src, lines, now);
     }),
@@ -245,6 +261,9 @@ export async function refreshAllFeeds(
         if (!key) continue;
         message = message.split(key).join("[redacted]").split(encodeURIComponent(key)).join("[redacted]");
       }
+      // refreshAllFeeds never throws, so without this a failed feed leaves no
+      // trace in Workers Logs; feed_meta alone is only seen if someone reads /health.
+      console.error(`feed refresh failed: ${src.name}: ${message}`);
       // Record the failure in feed_meta too — a source that's been failing for
       // days should be visible at /health, not indistinguishable from "fresh".
       try {

@@ -536,11 +536,14 @@ export default {
 
     if (pathname === "/health") {
       // feed_meta says what the last refresh wrote; blobs says whether the KV
-      // copies the checks read are actually usable right now.
-      const blobs = await readBlobStatus(env);
+      // copies the checks read are actually usable right now. Either one failing
+      // is "degraded": a feed whose refresh failed still has its old blob, so the
+      // blob check alone would report ok while it goes stale.
+      const [blobs, feeds] = await Promise.all([readBlobStatus(env), readFeedMeta(env)]);
       const blobsOk = typeof blobs === "object" && Object.values(blobs).every((v) => v === "ok");
+      const feedsOk = Array.isArray(feeds) && feeds.every((f) => (f as { last_status?: unknown }).last_status === "ok");
       return Response.json(
-        { status: blobsOk ? "ok" : "degraded", service: "linkcheck-mcp", version: VERSION, feeds: await readFeedMeta(env), blobs },
+        { status: blobsOk && feedsOk ? "ok" : "degraded", service: "linkcheck-mcp", version: VERSION, feeds, blobs },
         { headers: { link: LINK_HEADER } },
       );
     }

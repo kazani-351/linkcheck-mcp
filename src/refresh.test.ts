@@ -188,7 +188,8 @@ test("KV feed: full-blob overwrite, no diff logic", async () => {
   assert.equal(kv.store.get("feed:tif-domains"), "#sorted-v1\nevil-a.com\nevil-b.com\nevil-c.com");
 });
 
-test("one failing source does not block the other five (Promise.allSettled isolation)", async () => {
+test("one failing source does not block the other five (Promise.allSettled isolation)", async (t) => {
+  t.mock.method(console, "error", () => {});
   const db = fakeD1();
   const kv = fakeKv();
   const fetchText: FetchFn = async (url) => {
@@ -197,7 +198,7 @@ test("one failing source does not block the other five (Promise.allSettled isola
     return "example.com\n";
   };
 
-  const results = await refreshAllFeeds(db, kv, 1000, fetchText, SECRETS);
+  const results = await refreshAllFeeds(db, kv, 1000, fetchText, SECRETS, 0);
   assert.equal(results.length, FEED_SOURCES.length);
 
   const failed = results.find((r) => r.source === "URLhaus")!;
@@ -208,7 +209,8 @@ test("one failing source does not block the other five (Promise.allSettled isola
   assert.ok(others.every((r) => r.status === "ok"), "every other source should still succeed");
 });
 
-test("a failed source writes an error status to feed_meta, not silently skipped", async () => {
+test("a failed source writes an error status to feed_meta, not silently skipped", async (t) => {
+  t.mock.method(console, "error", () => {});
   const db = fakeD1({ feed_meta: [{ source: "URLhaus", last_refresh: 1, last_status: "ok", entry_count: 99 }] });
   const kv = fakeKv();
   const fetchText: FetchFn = async (url) => {
@@ -217,7 +219,7 @@ test("a failed source writes an error status to feed_meta, not silently skipped"
     return "example.com\n";
   };
 
-  await refreshAllFeeds(db, kv, 2000, fetchText, SECRETS);
+  await refreshAllFeeds(db, kv, 2000, fetchText, SECRETS, 0);
   const meta = db.tables.feed_meta.find((r) => r.source === "URLhaus")!;
   assert.match(meta.last_status as string, /error: timeout/);
   assert.equal(meta.last_refresh, 2000);
@@ -306,4 +308,70 @@ test("URLhaus: a 200 that isn't the export, or has no online rows, is an error a
     assert.equal(outcome.status, "error");
     assert.equal(kv.store.get("feed:urlhaus"), "#sorted-v1\nhttp://kept.example/", "existing blob must not be wiped");
   }
+});
+
+test("retry: a download that fails once then succeeds is ok, with no error logged", async (t) => {
+  const err = t.mock.method(console, "error", () => {});
+  const db = fakeD1();
+  const kv = fakeKv();
+  let tifCalls = 0;
+  const fetchText: FetchFn = async (url) => {
+    if (srcFor(url).name === "HaGeZi-TIF-domains" && ++tifCalls === 1) throw new Error("fetch -> HTTP 503");
+    return "example.com\n";
+  };
+
+  const results = await refreshAllFeeds(db, kv, 1000, fetchText, SECRETS, 0);
+  assert.equal(tifCalls, 2);
+  assert.equal(results.find((r) => r.source === "HaGeZi-TIF-domains")!.status, "ok");
+  assert.equal(kv.store.get("feed:tif-domains")?.includes("example.com"), true);
+  // (URLhaus logs its own error here: "example.com" isn't a URLhaus export.)
+  assert.ok(!err.mock.calls.some((c) => String(c.arguments[0]).includes("HaGeZi-TIF-domains")), "a recovered feed must not log an error");
+});
+
+test("retry: waits retryDelayMs before the second attempt", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const times: number[] = [];
+  const fetchText: FetchFn = async (url) => {
+    if (srcFor(url).name !== "HaGeZi-Shortener") return "example.com\n";
+    times.push(Date.now());
+    throw new Error("down");
+  };
+
+  await refreshAllFeeds(fakeD1(), fakeKv(), 1000, fetchText, SECRETS, 50);
+  assert.equal(times.length, 2);
+  assert.ok(times[1] - times[0] >= 45, `gap was ${times[1] - times[0]}ms`);
+});
+
+test("retry: two failures give up after exactly 2 attempts and log one error with the key scrubbed", async (t) => {
+  const err = t.mock.method(console, "error", () => {});
+  const db = fakeD1();
+  let urlhausCalls = 0;
+  const fetchText: FetchFn = async (url) => {
+    if (srcFor(url).name !== "URLhaus") return "example.com\n";
+    urlhausCalls++;
+    throw new Error(`fetch ${url} -> HTTP 502`); // the real fetcher puts the keyed URL in its error
+  };
+
+  const results = await refreshAllFeeds(db, fakeKv(), 1000, fetchText, SECRETS, 0);
+  assert.equal(urlhausCalls, 2);
+  assert.equal(results.find((r) => r.source === "URLhaus")!.status, "error");
+  assert.equal(err.mock.callCount(), 1);
+  const logged = String(err.mock.calls[0].arguments[0]);
+  assert.match(logged, /feed refresh failed: URLhaus: .*HTTP 502/);
+  assert.ok(!logged.includes(SECRETS.URLHAUS_AUTH_KEY) && !logged.includes(encodeURIComponent(SECRETS.URLHAUS_AUTH_KEY)), "secret leaked into the log line");
+});
+
+test("retry: a missing secret or an unparseable 200 is not retried", async (t) => {
+  t.mock.method(console, "error", () => {});
+  let calls = 0;
+  const notExport: FetchFn = async (url) => {
+    if (srcFor(url).name === "URLhaus") calls++;
+    return srcFor(url).name === "URLhaus" ? "<html>not the export</html>" : "example.com\n";
+  };
+  await refreshAllFeeds(fakeD1(), fakeKv(), 1000, notExport, SECRETS, 0);
+  assert.equal(calls, 1, "parse failure must not trigger a second download");
+
+  calls = 0;
+  await refreshAllFeeds(fakeD1(), fakeKv(), 1000, notExport, {}, 0);
+  assert.equal(calls, 0, "missing secret must not download at all");
 });

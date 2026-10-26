@@ -183,6 +183,39 @@ test("/health says degraded and names the blob when feed:urlhaus is missing", as
   assert.equal(body.blobs["feed:tif-domains"], "ok");
 });
 
+// fakeEnv's D1 with feed_meta rows planted, for the /health status tests.
+function envWithFeedMeta(rows: Array<{ source: string; last_status: string }>) {
+  const env = fakeEnv();
+  const prepare = env.FEEDS_DB.prepare;
+  env.FEEDS_DB.prepare = (sql: string) =>
+    sql.includes("FROM feed_meta")
+      ? ({ bind: () => ({ all: async <T>() => ({ results: rows as T[] }), run: async () => ({ success: true }) }) } as ReturnType<typeof prepare>)
+      : prepare(sql);
+  return env;
+}
+
+test("/health stays ok when every feed's last refresh was ok", async () => {
+  const env = envWithFeedMeta([{ source: "URLhaus", last_status: "ok" }, { source: "HaGeZi-TIF-ips", last_status: "ok" }]);
+  const body = await (await worker.fetch(new Request("http://localhost/health"), env, ctx)).json() as { status: string };
+  assert.equal(body.status, "ok");
+});
+
+test("/health says degraded when a feed's last refresh failed, even though its old blob is still there", async () => {
+  const env = envWithFeedMeta([{ source: "URLhaus", last_status: "error: fetch -> HTTP 502" }, { source: "HaGeZi-TIF-ips", last_status: "ok" }]);
+  const res = await worker.fetch(new Request("http://localhost/health"), env, ctx);
+  assert.equal(res.status, 200);
+  const body = await res.json() as { status: string; blobs: Record<string, string> };
+  assert.equal(body.status, "degraded");
+  assert.deepEqual(Object.values(body.blobs), ["ok", "ok", "ok", "ok"]); // blobs fine: only feed_meta caught it
+});
+
+test("/health says degraded when feed_meta can't be read", async () => {
+  const env = fakeEnv();
+  env.FEEDS_DB.prepare = () => { throw new Error("D1 down"); };
+  const body = await (await worker.fetch(new Request("http://localhost/health"), env, ctx)).json() as { status: string };
+  assert.equal(body.status, "degraded");
+});
+
 // Deterministic web for /check: canned HEAD responses per URL, DoH answers with
 // an IP on no feed. Anything else is a test bug, so it throws.
 async function withFakeWeb<T>(pages: Record<string, Response>, run: () => Promise<T>): Promise<T> {
