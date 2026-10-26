@@ -11,8 +11,10 @@ import { toSortedBlob, type WritableD1, type WritableKV } from "./feeds.ts";
 
 const FETCH_TIMEOUT_MS = 30_000;
 // The cron runs once a day, so a single blip upstream would leave a feed a full
-// day stale. One retry after a short pause covers transient errors; a feed that
-// fails twice is a real outage and is reported as one (feed_meta + console.error).
+// day stale. One retry after a short pause covers transient errors (network,
+// timeout, 5xx, 429); a 4xx like a bad key (401/403) or a moved feed (404) won't
+// change in 2s and isn't retried. A feed that fails for good is reported as one
+// (feed_meta + console.error).
 const RETRY_DELAY_MS = 2_000;
 // D1's real limit is 100 bound parameters per query (verified against docs AND
 // hit live in production — a prior guess of 400 rows/statement, based on
@@ -92,11 +94,25 @@ export interface FetchFn {
   (url: string): Promise<string>;
 }
 
+/** A non-2xx feed response; `status` lets the refresh tell transient from permanent. */
+export class FeedHttpError extends Error {
+  status: number;
+  constructor(url: string, status: number) {
+    super(`fetch ${url} -> HTTP ${status}`);
+    this.status = status;
+  }
+}
+
+/** Anything that isn't an HTTP answer (network error, timeout) is transient, as are 5xx and 429. */
+function isTransient(e: unknown): boolean {
+  return !(e instanceof FeedHttpError) || e.status >= 500 || e.status === 429;
+}
+
 /** Default fetcher: real network, strips comment/blank lines. Injectable so
  *  diff/write logic below can be unit-tested without hitting the internet. */
 export const defaultFetchFeedText: FetchFn = async (url: string): Promise<string> => {
   const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-  if (!res.ok) throw new Error(`fetch ${url} -> HTTP ${res.status}`);
+  if (!res.ok) throw new FeedHttpError(url, res.status);
   return res.text();
 };
 
@@ -225,12 +241,13 @@ export async function refreshAllFeeds(
   secrets: FeedSecrets = {},
   retryDelayMs: number = RETRY_DELAY_MS,
 ): Promise<RefreshOutcome[]> {
-  // Retries the download only: a missing secret or an unparseable 200 won't
-  // change on a second try.
+  // Retries the download only, and only a transient failure: a missing secret,
+  // an unparseable 200 or a 4xx won't change on a second try.
   const fetchWithRetry = async (url: string): Promise<string> => {
     try {
       return await fetchText(url);
-    } catch {
+    } catch (e) {
+      if (!isTransient(e)) throw e;
       await new Promise((r) => setTimeout(r, retryDelayMs));
       return fetchText(url);
     }

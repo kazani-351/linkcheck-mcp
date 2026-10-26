@@ -375,3 +375,34 @@ test("retry: a missing secret or an unparseable 200 is not retried", async (t) =
   await refreshAllFeeds(fakeD1(), fakeKv(), 1000, notExport, {}, 0);
   assert.equal(calls, 0, "missing secret must not download at all");
 });
+
+// Through the real defaultFetchFeedText (global fetch stubbed), so the HTTP
+// status reaches the retry gate the way production sees it.
+async function urlhausAttempts(t: { mock: { method: Function } }, upstream: () => Promise<Response>): Promise<number> {
+  t.mock.method(console, "error", () => {});
+  let calls = 0;
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    if (srcFor(String(input)).name !== "URLhaus") return new Response("example.com\n");
+    calls++;
+    return upstream();
+  }) as typeof fetch;
+  try {
+    await refreshAllFeeds(fakeD1(), fakeKv(), 1000, undefined, SECRETS, 0);
+  } finally {
+    globalThis.fetch = original;
+  }
+  return calls;
+}
+
+test("retry: a 401 (bad key) is permanent and not retried", async (t) => {
+  assert.equal(await urlhausAttempts(t, async () => new Response("unauthorized", { status: 401 })), 1);
+});
+
+test("retry: 404 is permanent too; 5xx, 429 and network errors are retried once", async (t) => {
+  assert.equal(await urlhausAttempts(t, async () => new Response("gone", { status: 404 })), 1);
+  assert.equal(await urlhausAttempts(t, async () => new Response("down", { status: 503 })), 2);
+  assert.equal(await urlhausAttempts(t, async () => new Response("slow down", { status: 429 })), 2);
+  assert.equal(await urlhausAttempts(t, async () => { throw new TypeError("fetch failed"); }), 2);
+  assert.equal(await urlhausAttempts(t, async () => { throw new DOMException("The operation timed out.", "TimeoutError"); }), 2);
+});
