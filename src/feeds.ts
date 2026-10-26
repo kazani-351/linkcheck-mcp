@@ -129,10 +129,19 @@ const BLOB_CACHE_TTL_MS = 15 * 60 * 1000;
 // parse a 100K–580K-line blob itself — 5 URLs × 3 blobs blew the Worker CPU
 // limit in production (exceededCpu, 2026-09-27). A failed load is evicted so
 // the next lookup retries instead of replaying the error for 15 minutes.
-/** First line of every blob refresh.ts writes. A blob without it (written before
- *  this format existed) is unsorted, and binary search over it would miss
- *  entries — a false-safe — so it falls back to a Set until the next refresh. */
+/** First line of every blob refresh.ts writes. Every blob has carried it since
+ *  2026-10-24, so a blob without it is not ours to binary-search (an unsorted
+ *  body would miss entries — a false-safe) and is rejected as unusable. */
 export const SORTED_BLOB_HEADER = "#sorted-v1";
+
+/** Same rules as toBlobIndex, on just the blob's first bytes: null if usable,
+ *  else the reason. Shared with /health, which must not read whole blobs. */
+function blobProblem(head: string | null): string | null {
+  if (head === null) return "missing";
+  if (!head.startsWith(`${SORTED_BLOB_HEADER}\n`)) return "unparseable (no sorted header)";
+  if (head.length === SORTED_BLOB_HEADER.length + 1) return "empty";
+  return null;
+}
 
 /** The on-KV format: header, then entries in ascending code-unit order, unique.
  *  Feeds that arrive sorted (HaGeZi NRD, 765K lines) skip the sort. */
@@ -175,9 +184,11 @@ function sortedBlobIndex(raw: string): BlobIndex {
 }
 
 function toBlobIndex(raw: string | null): BlobIndex {
-  if (!raw) return new Set<string>();
-  if (raw.startsWith(`${SORTED_BLOB_HEADER}\n`)) return sortedBlobIndex(raw);
-  return new Set(raw.split("\n").filter(Boolean));
+  // A missing or empty blob used to read as an empty Set — "not listed" — so a
+  // lost feed silently turned matches into SAFE. Throw; callers degrade.
+  const problem = blobProblem(raw);
+  if (problem) throw new Error(problem);
+  return sortedBlobIndex(raw!);
 }
 
 const blobSetCache = new Map<string, { set: Promise<BlobIndex>; loadedAt: number }>();
@@ -214,4 +225,38 @@ export async function lookupDomainInBlob(kv: MinimalKV, blobKey: string, hostnam
     if (set.has(candidate)) return { matchedValue: candidate, source };
   }
   return null;
+}
+
+/** First of `values` found in the blob, in order — one blob load for all of them. */
+export async function lookupFirstInBlob(kv: MinimalKV, blobKey: string, values: string[], source: string): Promise<FeedHit | null> {
+  const set = await loadBlobSet(kv, blobKey);
+  const hit = values.find((v) => set.has(v));
+  return hit === undefined ? null : { matchedValue: hit, source };
+}
+
+/** KV slice that can stream a value — real Workers KV does. Lets /health check a
+ *  blob from its first chunk instead of reading 17 MB (NRD) on every ping. */
+export interface StreamKV {
+  get(key: string, options: { type: "stream" }): Promise<ReadableStream<Uint8Array> | null>;
+}
+
+/** "ok" or why the blob is unusable, from its first bytes only. */
+export async function probeBlob(kv: StreamKV, key: string): Promise<string> {
+  try {
+    const stream = await kv.get(key, { type: "stream" });
+    if (!stream) return "missing";
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let head = "";
+    // Chunks can split anywhere; stop once one byte past the header line is in.
+    while (head.length <= SORTED_BLOB_HEADER.length + 1) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      head += decoder.decode(value, { stream: true });
+    }
+    await reader.cancel();
+    return blobProblem(head) ?? "ok";
+  } catch (e) {
+    return `error: ${(e as Error).message}`;
+  }
 }

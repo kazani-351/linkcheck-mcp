@@ -12,7 +12,10 @@ import {
   lookupTld,
   lookupDomainInBlob,
   lookupInBlob,
+  lookupFirstInBlob,
+  probeBlob,
   type FeedHit,
+  type StreamKV,
   type WritableD1,
   type WritableKV,
 } from "./feeds.ts";
@@ -83,9 +86,20 @@ interface Env {
   // closed — unset means nobody gets either.
   OWNER_TOKEN?: string;
   FEEDS_DB?: WritableD1;
-  VERDICT_CACHE?: WritableKV;
+  VERDICT_CACHE?: WritableKV & StreamKV;
   VIRUSTOTAL_API_KEY?: string;
   URLHAUS_AUTH_KEY?: string;
+}
+
+/** A KV feed that can't be read degrades the check (verdict at least
+ *  SUSPICIOUS, reason names the feed) instead of reading as "not listed". */
+async function blobLookup(lookup: Promise<FeedHit | null>, source: string, degraded: string[]): Promise<FeedHit | null> {
+  try {
+    return await lookup;
+  } catch (e) {
+    degraded.push(`${source} feed unavailable (${(e as Error).message})`);
+    return null;
+  }
 }
 
 // Shared by check_url and check_text — resolve, clean, heuristically inspect, and
@@ -121,12 +135,17 @@ async function checkOneUrl(url: string, env: Env, useVirusTotal = true) {
     // never meant to resolve — see CLAUDE.md).
     const hostIsIpLiteral = isIpLiteral(hostname);
 
+    // Every URL the request passed through, not only the last: URLhaus lists the
+    // link people share (36% of it is github.com/.../releases/download/...),
+    // which then redirects to an asset host URLhaus doesn't list.
+    const urlhausCandidates = [...new Set([resolved.inputUrl, ...resolved.chain, resolved.finalUrl])];
+
     const [exactUrlHit, shortenerHit, tldHit, tifDomainHit, nrdHit, dns] = await Promise.all([
-      lookupInBlob(kv, "feed:urlhaus", resolved.finalUrl, "URLhaus"),
+      blobLookup(lookupFirstInBlob(kv, "feed:urlhaus", urlhausCandidates, "URLhaus"), "URLhaus", degraded),
       lookupDomain(db, hostname),
       lookupTld(db, hostname),
-      lookupDomainInBlob(kv, "feed:tif-domains", hostname, "HaGeZi-TIF-domains"),
-      lookupDomainInBlob(kv, "feed:entropy-nrd", hostname, "HaGeZi-Entropy-NRD"),
+      blobLookup(lookupDomainInBlob(kv, "feed:tif-domains", hostname, "HaGeZi-TIF-domains"), "HaGeZi-TIF-domains", degraded),
+      blobLookup(lookupDomainInBlob(kv, "feed:entropy-nrd", hostname, "HaGeZi-Entropy-NRD"), "HaGeZi-Entropy-NRD", degraded),
       hostIsIpLiteral ? Promise.resolve({ ip: hostname.replace(/^\[|\]$/g, "") }) : resolveIp(hostname),
     ]);
 
@@ -139,7 +158,7 @@ async function checkOneUrl(url: string, env: Env, useVirusTotal = true) {
     if ("degraded" in dns && dns.degraded) degraded.push(dns.degraded);
     resolvedIp = dns.ip;
     if (dns.ip) {
-      const ipHit = await lookupInBlob(kv, "feed:tif-ips", dns.ip, "HaGeZi-TIF-ips");
+      const ipHit = await blobLookup(lookupInBlob(kv, "feed:tif-ips", dns.ip, "HaGeZi-TIF-ips"), "HaGeZi-TIF-ips", degraded);
       if (ipHit) feedSignals.push({ ...ipHit, type: "threat_intel_ip" });
     }
   } else if (hostname) {
@@ -458,6 +477,26 @@ async function readFeedMeta(env: Env): Promise<unknown> {
   }
 }
 
+const BLOB_KEYS = ["feed:urlhaus", "feed:tif-domains", "feed:tif-ips", "feed:entropy-nrd"];
+
+// /health is public and each probe is a KV read, which shares the free 100K/day
+// read quota with the feed lookups. Cached per isolate (and per binding, so tests
+// with different fakes don't share) to stop /health spam from starving /check.
+const BLOB_STATUS_TTL_MS = 5 * 60 * 1000;
+const blobStatusCache = new WeakMap<object, { at: number; status: Promise<Record<string, string>> }>();
+
+async function readBlobStatus(env: Env): Promise<Record<string, string> | string> {
+  if (!env.VERDICT_CACHE) return "unavailable (KV not bound)";
+  const kv = env.VERDICT_CACHE;
+  const cached = blobStatusCache.get(kv);
+  if (cached && Date.now() - cached.at < BLOB_STATUS_TTL_MS) return cached.status;
+  const status = Promise.all(BLOB_KEYS.map((k) => probeBlob(kv, k))).then((states) =>
+    Object.fromEntries(BLOB_KEYS.map((k, i) => [k, states[i]])),
+  );
+  blobStatusCache.set(kv, { at: Date.now(), status });
+  return status;
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const { pathname } = new URL(request.url);
@@ -496,8 +535,12 @@ export default {
     }
 
     if (pathname === "/health") {
+      // feed_meta says what the last refresh wrote; blobs says whether the KV
+      // copies the checks read are actually usable right now.
+      const blobs = await readBlobStatus(env);
+      const blobsOk = typeof blobs === "object" && Object.values(blobs).every((v) => v === "ok");
       return Response.json(
-        { status: "ok", service: "linkcheck-mcp", version: VERSION, feeds: await readFeedMeta(env) },
+        { status: blobsOk ? "ok" : "degraded", service: "linkcheck-mcp", version: VERSION, feeds: await readFeedMeta(env), blobs },
         { headers: { link: LINK_HEADER } },
       );
     }

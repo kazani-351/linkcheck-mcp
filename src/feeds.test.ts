@@ -6,6 +6,8 @@ import {
   lookupTld,
   lookupInBlob,
   lookupDomainInBlob,
+  lookupFirstInBlob,
+  probeBlob,
   _resetBlobCacheForTests,
   toSortedBlob,
   SORTED_BLOB_HEADER,
@@ -123,7 +125,7 @@ function fakeKv(store: Record<string, string>): MinimalKV & { getCalls: number }
 
 test("lookupInBlob: exact membership (TIF-IPs shape)", async () => {
   _resetBlobCacheForTests();
-  const kv = fakeKv({ "feed:tif-ips": "203.0.113.5\n198.51.100.9" });
+  const kv = fakeKv({ "feed:tif-ips": toSortedBlob(["203.0.113.5", "198.51.100.9"]) });
   assert.deepEqual(await lookupInBlob(kv, "feed:tif-ips", "203.0.113.5", "HaGeZi-TIF-ips"), {
     matchedValue: "203.0.113.5",
     source: "HaGeZi-TIF-ips",
@@ -133,7 +135,7 @@ test("lookupInBlob: exact membership (TIF-IPs shape)", async () => {
 
 test("lookupDomainInBlob: parent-label walk against blob-backed data (subdomain evasion prevented)", async () => {
   _resetBlobCacheForTests();
-  const kv = fakeKv({ "feed:tif-domains": "evil.com\nother-bad.net" });
+  const kv = fakeKv({ "feed:tif-domains": toSortedBlob(["evil.com", "other-bad.net"]) });
   const hit = await lookupDomainInBlob(kv, "feed:tif-domains", "login.attacker.evil.com", "HaGeZi-TIF-domains");
   assert.deepEqual(hit, { matchedValue: "evil.com", source: "HaGeZi-TIF-domains" });
   assert.equal(await lookupDomainInBlob(kv, "feed:tif-domains", "anthropic.com", "HaGeZi-TIF-domains"), null);
@@ -165,18 +167,51 @@ test("sorted blob: parent-label walk still prevents subdomain evasion", async ()
   assert.equal(await lookupDomainInBlob(kv, "feed:tif-domains", "anthropic.com", "HaGeZi-TIF-domains"), null);
 });
 
-test("legacy blob without the header (pre-sort KV data) is still matched correctly", async () => {
-  _resetBlobCacheForTests();
-  // Unsorted on purpose: binary search over this would miss "a.com" — a false-safe.
-  const kv = fakeKv({ "feed:tif-domains": "z.com\na.com\nm.com" });
-  for (const v of ["z.com", "a.com", "m.com"]) {
-    assert.ok(await lookupInBlob(kv, "feed:tif-domains", v, "HaGeZi-TIF-domains"), `should find ${v}`);
+test("an unusable blob rejects instead of reading as an empty feed (missing, empty, headerless)", async () => {
+  // Each of these used to become an empty Set, so every lookup said "not listed".
+  const cases: Array<[string | undefined, RegExp]> = [
+    [undefined, /missing/],
+    [`${SORTED_BLOB_HEADER}\n`, /empty/],
+    ["", /no sorted header/],
+    ["z.com\na.com\nm.com", /no sorted header/],
+  ];
+  for (const [blob, reason] of cases) {
+    _resetBlobCacheForTests();
+    const kv = fakeKv(blob === undefined ? {} : { "feed:tif-domains": blob });
+    await assert.rejects(lookupInBlob(kv, "feed:tif-domains", "a.com", "T"), reason);
   }
+});
+
+test("lookupFirstInBlob: returns the first listed value, in caller order", async () => {
+  _resetBlobCacheForTests();
+  const kv = fakeKv({ "feed:urlhaus": toSortedBlob(["https://a.example/1", "https://b.example/2"]) });
+  assert.deepEqual(await lookupFirstInBlob(kv, "feed:urlhaus", ["https://x.example/", "https://b.example/2", "https://a.example/1"], "URLhaus"), {
+    matchedValue: "https://b.example/2",
+    source: "URLhaus",
+  });
+  assert.equal(await lookupFirstInBlob(kv, "feed:urlhaus", ["https://x.example/"], "URLhaus"), null);
+});
+
+test("probeBlob: reads only the head, across chunk splits, and names the problem", async () => {
+  // One byte per chunk: the header line and first entry arrive in pieces.
+  const chunked = (s: string) =>
+    new ReadableStream<Uint8Array>({
+      start(c) {
+        for (const b of new TextEncoder().encode(s)) c.enqueue(new Uint8Array([b]));
+        c.close();
+      },
+    });
+  const kv = (v: string | null) => ({ async get() { return v === null ? null : chunked(v); } });
+  assert.equal(await probeBlob(kv(toSortedBlob(["a.com", "b.com"])), "k"), "ok");
+  assert.equal(await probeBlob(kv(null), "k"), "missing");
+  assert.equal(await probeBlob(kv(`${SORTED_BLOB_HEADER}\n`), "k"), "empty");
+  assert.equal(await probeBlob(kv("a.com\nb.com"), "k"), "unparseable (no sorted header)");
+  assert.match(await probeBlob({ async get() { throw new Error("KV down"); } }, "k"), /^error: KV down/);
 });
 
 test("blob cache: kv.get is called once per key, not once per lookup", async () => {
   _resetBlobCacheForTests();
-  const kv = fakeKv({ "feed:entropy-nrd": "xk3jz9q.com\nother.net" });
+  const kv = fakeKv({ "feed:entropy-nrd": toSortedBlob(["xk3jz9q.com", "other.net"]) });
   await lookupInBlob(kv, "feed:entropy-nrd", "xk3jz9q.com", "HaGeZi-Entropy-NRD");
   await lookupInBlob(kv, "feed:entropy-nrd", "other.net", "HaGeZi-Entropy-NRD");
   await lookupInBlob(kv, "feed:entropy-nrd", "nope.com", "HaGeZi-Entropy-NRD");
@@ -192,7 +227,7 @@ test("blob cache: expires after its TTL, re-fetching so a cron refresh eventuall
   t.mock.timers.enable({ apis: ["Date"] });
   try {
     _resetBlobCacheForTests();
-    const store: Record<string, string> = { "feed:tif-domains": "old-evil.com" };
+    const store: Record<string, string> = { "feed:tif-domains": toSortedBlob(["old-evil.com"]) };
     const kv = fakeKv(store);
     assert.equal(await lookupInBlob(kv, "feed:tif-domains", "old-evil.com", "HaGeZi-TIF-domains") !== null, true);
     assert.equal(kv.getCalls, 1);
@@ -204,7 +239,7 @@ test("blob cache: expires after its TTL, re-fetching so a cron refresh eventuall
 
     // Cron "refreshes" the blob (new isolate, real production scenario) while
     // this isolate's cache is still holding the stale Set.
-    store["feed:tif-domains"] = "new-evil.com";
+    store["feed:tif-domains"] = toSortedBlob(["new-evil.com"]);
 
     // Past the TTL — next lookup should refetch and pick up the new data.
     t.mock.timers.tick(6 * 60 * 1000); // total 16 min, past the 15 min TTL
@@ -225,7 +260,7 @@ test("concurrent lookups on a cold cache fetch and parse each blob ONCE (no stam
     async get() {
       gets++;
       await new Promise((r) => setTimeout(r, 5)); // let every caller start before the first resolves
-      return "evil.com\nbad.net";
+      return toSortedBlob(["evil.com", "bad.net"]);
     },
   };
   const hits = await Promise.all(
@@ -242,7 +277,7 @@ test("a failed blob load is not cached — the next lookup retries", async () =>
     async get() {
       calls++;
       if (calls === 1) throw new Error("KV down");
-      return "evil.com";
+      return toSortedBlob(["evil.com"]);
     },
   };
   await assert.rejects(lookupDomainInBlob(kv, "feed:x", "evil.com", "T"));

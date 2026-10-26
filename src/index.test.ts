@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import worker from "./index.ts";
-import { _resetBlobCacheForTests } from "./feeds.ts";
+import { _resetBlobCacheForTests, toSortedBlob } from "./feeds.ts";
 
 const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
 const ENV = { MCP_BEARER_TOKEN: "test-secret", OWNER_TOKEN: "test-secret" };
@@ -14,6 +14,26 @@ const VT_KEY = process.env.VT_TEST_KEY; // live-gated, see virustotal.test.ts
 // response DTO), not the feed data itself (that's feeds.test.ts, against real
 // D1 query shape). "example.com" is planted as a shortener + exact-URL hit so a
 // real (non-production) resolve exercises every code path in checkOneUrl.
+// Every blob present (a missing one now degrades the check), filler where a test
+// doesn't care, plus the stream mode /health probes with. null = blob deleted.
+function blobKv(overrides: Record<string, string | null> = {}) {
+  const store: Record<string, string | null> = {
+    "feed:urlhaus": toSortedBlob(["https://filler.invalid/"]),
+    "feed:tif-domains": toSortedBlob(["filler.invalid"]),
+    "feed:tif-ips": toSortedBlob(["192.0.2.255"]),
+    "feed:entropy-nrd": toSortedBlob(["filler.invalid"]),
+    ...overrides,
+  };
+  return {
+    async get(key: string, opts?: { type: "stream" }) {
+      const v = store[key] ?? null;
+      if (opts?.type === "stream") return v === null ? null : new Blob([v]).stream();
+      return v;
+    },
+    async put() {}, // no-op — refresh.test.ts covers real KV-write semantics
+  };
+}
+
 function fakeEnv() {
   return {
     MCP_BEARER_TOKEN: "test-secret",
@@ -39,11 +59,8 @@ function fakeEnv() {
         };
       },
     },
-    VERDICT_CACHE: {
-      // Only the URLhaus exact-URL hit; TIF-domain/IP hits are tested in feeds.test.ts
-      async get(key: string) { return key === "feed:urlhaus" ? "#sorted-v1\nhttps://example.com/" : null; },
-      async put() {}, // no-op — refresh.test.ts covers real KV-write semantics
-    },
+    // Only the URLhaus exact-URL hit; TIF-domain/IP hits are tested in feeds.test.ts
+    VERDICT_CACHE: blobKv({ "feed:urlhaus": toSortedBlob(["https://example.com/"]) }),
   };
 }
 
@@ -150,9 +167,91 @@ test("brand assets are public: SVG favicon and real PNG bytes", async () => {
 });
 
 test("/health returns ok without auth", async () => {
-  const res = await worker.fetch(new Request("http://localhost/health"), ENV, ctx);
+  const res = await worker.fetch(new Request("http://localhost/health"), fakeEnv(), ctx);
   assert.equal(res.status, 200);
-  assert.equal((await res.json() as { status: string }).status, "ok");
+  const body = await res.json() as { status: string; blobs: Record<string, string> };
+  assert.equal(body.status, "ok");
+  assert.deepEqual(Object.values(body.blobs), ["ok", "ok", "ok", "ok"]);
+});
+
+test("/health says degraded and names the blob when feed:urlhaus is missing", async () => {
+  const env = { ...fakeEnv(), VERDICT_CACHE: blobKv({ "feed:urlhaus": null }) };
+  const res = await worker.fetch(new Request("http://localhost/health"), env, ctx);
+  const body = await res.json() as { status: string; blobs: Record<string, string> };
+  assert.equal(body.status, "degraded");
+  assert.equal(body.blobs["feed:urlhaus"], "missing");
+  assert.equal(body.blobs["feed:tif-domains"], "ok");
+});
+
+// Deterministic web for /check: canned HEAD responses per URL, DoH answers with
+// an IP on no feed. Anything else is a test bug, so it throws.
+async function withFakeWeb<T>(pages: Record<string, Response>, run: () => Promise<T>): Promise<T> {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.startsWith("https://cloudflare-dns.com/")) {
+      return Response.json({ Answer: [{ type: 1, data: "198.51.100.20" }] });
+    }
+    const page = pages[url];
+    if (!page) throw new Error(`unexpected fetch: ${url}`);
+    return page.clone();
+  }) as typeof fetch;
+  try {
+    return await run();
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+async function postCheck(url: string, env: ReturnType<typeof fakeEnv>) {
+  const res = await worker.fetch(
+    new Request("http://localhost/check", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer test-secret" },
+      body: JSON.stringify({ url }),
+    }),
+    env,
+    ctx,
+  );
+  return res.json() as Promise<{ verdict: string; degraded: string[]; finalUrl: string; feedSignals: Array<{ type: string; matchedValue: string }> }>;
+}
+
+test("/check never says SAFE when feed:urlhaus is deleted or unparseable", async () => {
+  const pages = { "https://clean.example/": new Response(null, { status: 200 }) };
+  await withFakeWeb(pages, async () => {
+    // Control: with every blob intact this URL is SAFE, so the change below is
+    // what moves the verdict.
+    _resetBlobCacheForTests();
+    assert.equal((await postCheck("https://clean.example/", fakeEnv())).verdict, "SAFE");
+
+    for (const [blob, reason] of [[null, "missing"], ["<html>not a feed</html>", "unparseable"], [toSortedBlob([]), "empty"]] as const) {
+      _resetBlobCacheForTests();
+      const env = { ...fakeEnv(), VERDICT_CACHE: blobKv({ "feed:urlhaus": blob }) };
+      const r = await postCheck("https://clean.example/", env);
+      assert.notEqual(r.verdict, "SAFE", `blob ${reason}: must not be SAFE`);
+      assert.ok(r.degraded.some((d) => d.startsWith("URLhaus feed unavailable") && d.includes(reason)), `blob ${reason}: degraded should name URLhaus, got ${JSON.stringify(r.degraded)}`);
+    }
+  });
+});
+
+test("URLhaus matches a listed GitHub release link that redirects to the asset host", async () => {
+  // A real feed:urlhaus entry (2026-10-26). GitHub answers it with a 302 to
+  // release-assets.githubusercontent.com, which URLhaus does not list, so a
+  // final-URL-only lookup missed it (SUSPICIOUS, no URLhaus signal, in prod).
+  const listed = "https://github.com/0290192029/apartment-price-predictor/releases/download/v1.0/Soft.zip";
+  const asset = "https://release-assets.githubusercontent.com/github-production-release-asset/919196134/321e981b-85c8-4996-a162-a15df642e99a?sp=r&sig=test";
+  const pages = {
+    [listed]: new Response(null, { status: 302, headers: { location: asset } }),
+    [asset]: new Response(null, { status: 200 }),
+  };
+  await withFakeWeb(pages, async () => {
+    _resetBlobCacheForTests();
+    const env = { ...fakeEnv(), VERDICT_CACHE: blobKv({ "feed:urlhaus": toSortedBlob([listed]) }) };
+    const r = await postCheck(listed, env);
+    assert.equal(r.finalUrl, asset, "the redirect should have been followed");
+    assert.equal(r.verdict, "DANGEROUS");
+    assert.ok(r.feedSignals.some((f) => f.type === "urlhaus_exact_url" && f.matchedValue === listed));
+  });
 });
 
 test("POST /mcp without bearer -> 401", async () => {
@@ -273,7 +372,7 @@ test("check_url skips DoH and checks the feed directly for an IP-literal host", 
   // address so the resolver's SSRF guard short-circuits BEFORE any network
   // fetch (private_host), keeping the test instant — same pattern as the
   // heuristics test above, not a real network probe.
-  env.VERDICT_CACHE = { async get(key: string) { return key === "feed:tif-ips" ? "169.254.169.254\nother.ip" : null; } };
+  env.VERDICT_CACHE = blobKv({ "feed:tif-ips": toSortedBlob(["169.254.169.254", "other.ip"]) });
   const res = await worker.fetch(
     mcpReq(
       { jsonrpc: "2.0", id: 12, method: "tools/call", params: { name: "check_url", arguments: { url: "http://169.254.169.254/x" } } },
